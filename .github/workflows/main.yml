@@ -1,13 +1,12 @@
-name: Stock Monitor
+name: Hybrid Stock Monitor
 
 on:
   schedule:
-    # 日本時間 9:00 ～ 15:00 の間、15分おきに実行
-    # (GitHubは世界標準時なので -9時間 で設定します)
-    # 0:00 UTC (= 9:00 JST) から 6:00 UTC (= 15:00 JST) まで
-    - cron: '*/15 0-6 * * 1-5'
+    # 日本時間 9:00 ～ 15:00 の間、5分おきに実行
+    # GitHub Actionsの仕様上、最短でも5-10分間隔になります
+    # 0-6 UTC = 9-15 JST
+    - cron: '*/5 0-6 * * 1-5'
   
-  # 手動実行ボタンもつけておく
   workflow_dispatch:
 
 jobs:
