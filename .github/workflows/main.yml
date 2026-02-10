@@ -1,0 +1,31 @@
+name: Stock Monitor
+
+on:
+  schedule:
+    # 日本時間 9:00 ～ 15:00 の間、15分おきに実行
+    # (GitHubは世界標準時なので -9時間 で設定します)
+    # 0:00 UTC (= 9:00 JST) から 6:00 UTC (= 15:00 JST) まで
+    - cron: '*/15 0-6 * * 1-5'
+  
+  # 手動実行ボタンもつけておく
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run script
+        env:
+          DISCORD_URL: ${{ secrets.DISCORD_URL }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: python main.py
