@@ -1,208 +1,97 @@
-import os
 import yfinance as yf
 import pandas as pd
 import requests
 import json
-import datetime
-import time
+from datetime import datetime, timedelta, timezone
+import os
 
 # ==========================================
-# ⚙️ 設定 (GitHub Secrets)
+# ⚙️ 設定エリア
 # ==========================================
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_URL")
-SHEET_ID = os.environ.get("SHEET_ID")
+
+# DiscordのURL (GitHubのSecretsに登録推奨ですが、まずはここに直書きでも動きます)
+DISCORD_WEBHOOK_URL = "ここにあなたのDiscordウェブフックURLを貼り付けてください"
+
+# 監視対象の銘柄コードと名前
+WATCH_LIST = {
+    "6098.T": "リクルート",
+    "6758.T": "ソニーG",
+    "9984.T": "SBG",
+    "7203.T": "トヨタ",
+    # 好きな銘柄を追加してください
+}
 
 # ==========================================
-# 🛠️ 共通関数
+# 🧠 ロジックエリア
 # ==========================================
-def get_watch_lists():
-    """スプレッドシートからデイトレ用(A列)とスイング用(B列)を読み込む"""
+
+def send_discord(message):
+    """Discordにメッセージを送信する"""
+    if not DISCORD_WEBHOOK_URL.startswith("http"):
+        print("⚠️ Discord URLが設定されていません")
+        return
+
+    data = {"content": message}
     try:
-        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
-        df = pd.read_csv(url, header=None, dtype=str).fillna("")
-        
-        day_tickers = []
-        swing_tickers = []
-
-        # 2行目(index 1)以降を読み込む（1行目はヘッダー想定）
-        if len(df) > 1:
-            # A列: デイトレ
-            raw_day = df.iloc[1:, 0].tolist()
-            for t in raw_day:
-                t = str(t).strip()
-                if t.isdigit(): day_tickers.append(f"{t}.T")
-                elif t: day_tickers.append(t)
-            
-            # B列: スイング（B列が存在する場合）
-            if len(df.columns) > 1:
-                raw_swing = df.iloc[1:, 1].tolist()
-                for t in raw_swing:
-                    t = str(t).strip()
-                    if t.isdigit(): swing_tickers.append(f"{t}.T")
-                    elif t: swing_tickers.append(t)
-        
-        return day_tickers, swing_tickers
+        requests.post(DISCORD_WEBHOOK_URL, json=data)
     except Exception as e:
-        print(f"Sheet Error: {e}")
-        return [], []
+        print(f"送信エラー: {e}")
 
-def send_discord(msg, title="通知"):
-    if not DISCORD_WEBHOOK_URL: return
-    data = {"content": f"{title} {msg}"}
-    requests.post(DISCORD_WEBHOOK_URL, headers={"Content-Type": "application/json"}, data=json.dumps(data))
-
-def calc_indicators(df):
-    """RSIとMACDを計算する"""
-    if len(df) < 26: return df
-    
-    # RSI (14)
-    close = df['Close']
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + gain/loss))
-
-    # MACD (12, 26, 9)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['SIGNAL'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    return df
-
-def generate_3min_candles(df_1m):
-    """1分足から3分足を生成する"""
-    # 3分ごとにリサンプリング
-    df_3m = df_1m.resample('3T').agg({
-        'Open': 'first',
-        'High': 'max',
-        'Low': 'min',
-        'Close': 'last',
-        'Volume': 'sum'
-    }).dropna()
-    return df_3m
-
-# ==========================================
-# 🐇 デイトレ監視ロジック (3分足)
-# ==========================================
-def check_day_trade(tickers):
-    if not tickers: return []
-    print(f"🐇 デイトレ監視開始: {len(tickers)}銘柄")
-    msgs = []
-
-    for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            # 1分足を直近取得して、3分足を作る
-            # ※yfinanceには3mがないため、1mを取得して合成する
-            hist = stock.history(period="1d", interval="1m")
-            
-            if len(hist) < 30: continue
-            
-            # 3分足生成
-            df = generate_3min_candles(hist)
-            if len(df) < 26: continue
-
-            # 指標計算
-            df = calc_indicators(df)
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
-            price_str = f"{curr['Close']:,.0f}"
-
-            # --- 判定 ---
-            # 1. MACD ゴールデンクロス/デッドクロス
-            if prev['MACD'] < prev['SIGNAL'] and curr['MACD'] > curr['SIGNAL']:
-                msgs.append(f"🚀 **{ticker} (3分足)** MACDゴールデンクロス ({price_str}円)")
-            elif prev['MACD'] > prev['SIGNAL'] and curr['MACD'] < curr['SIGNAL']:
-                msgs.append(f"💀 **{ticker} (3分足)** MACDデッドクロス ({price_str}円)")
-
-            # 2. RSI シグナル (敏感に反応させるため 25/75)
-            if curr['RSI'] <= 25:
-                msgs.append(f"✨ **{ticker} (3分足)** 買い時 RSI:{curr['RSI']:.1f} ({price_str}円)")
-            elif curr['RSI'] >= 75:
-                msgs.append(f"📉 **{ticker} (3分足)** 売り時 RSI:{curr['RSI']:.1f} ({price_str}円)")
-
-        except Exception as e:
-            print(f"Err Day {ticker}: {e}")
-            
-    return msgs
-
-# ==========================================
-# 🐢 スイング監視ロジック (日足 & 30分足)
-# ==========================================
-def check_swing_trade(tickers):
-    if not tickers: return []
-    
-    # 時間制御: 前場(11:00-11:30) と 後場(14:30-15:00) の間のみ実行
-    # ※GitHub Actionsの時刻ズレも考慮し、幅を持たせています
-    JST = datetime.timezone(datetime.timedelta(hours=9))
-    now = datetime.datetime.now(JST)
-    current_time = now.strftime('%H:%M')
-    
-    # チェックすべき時間帯か？
-    is_morning_check = ("11:00" <= current_time <= "11:35")
-    is_afternoon_check = ("14:30" <= current_time <= "15:05")
-
-    if not (is_morning_check or is_afternoon_check):
-        print(f"💤 スイング監視対象外の時間です ({current_time})")
-        return []
-
-    print(f"🐢 スイング監視開始 ({current_time}): {len(tickers)}銘柄")
-    msgs = []
-
-    for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            
-            # --- 日足チェック ---
-            hist_d = stock.history(period="6mo", interval="1d")
-            hist_d = calc_indicators(hist_d)
-            curr_d = hist_d.iloc[-1]
-            prev_d = hist_d.iloc[-2]
-
-            # --- 30分足チェック ---
-            hist_30m = stock.history(period="5d", interval="30m")
-            hist_30m = calc_indicators(hist_30m)
-            curr_30 = hist_30m.iloc[-1]
-            prev_30 = hist_30m.iloc[-2]
-            
-            price_str = f"{curr_d['Close']:,.0f}"
-
-            # 判定ロジック (日足と30分足の複合条件など自由に設定可)
-            
-            # 日足 MACD/RSI
-            if prev_d['MACD'] < prev_d['SIGNAL'] and curr_d['MACD'] > curr_d['SIGNAL']:
-                msgs.append(f"🌊 **{ticker} (日足)** MACDゴールデンクロス ({price_str}円)")
-            if curr_d['RSI'] <= 30:
-                msgs.append(f"💎 **{ticker} (日足)** RSI底値圏: {curr_d['RSI']:.1f}")
-
-            # 30分足 MACD
-            if prev_30['MACD'] < prev_30['SIGNAL'] and curr_30['MACD'] > curr_30['SIGNAL']:
-                msgs.append(f"🌊 **{ticker} (30分足)** MACD好転 ({price_str}円)")
-
-        except Exception as e:
-            print(f"Err Swing {ticker}: {e}")
-
-    return msgs
-
-# ==========================================
-# 🚀 メイン実行
-# ==========================================
-def main():
-    day_list, swing_list = get_watch_lists()
-    
-    # デイトレは毎回チェック
-    day_msgs = check_day_trade(day_list)
-    if day_msgs:
-        send_discord("\n".join(day_msgs), "🐇【デイトレ】")
-    
-    # スイングは時間限定チェック
-    swing_msgs = check_swing_trade(swing_list)
-    if swing_msgs:
-        send_discord("\n".join(swing_msgs), "🐢【スイング】")
+def check_stock(ticker, name):
+    """株価をチェックして条件に合えば通知用メッセージを返す"""
+    try:
+        stock = yf.Ticker(ticker)
+        # 直近1日分のデータを取得
+        hist = stock.history(period="1d")
         
-    if not day_msgs and not swing_msgs:
-        print("No signals.")
+        if hist.empty:
+            return None
 
+        # 現在値の取得
+        current_price = hist["Close"].iloc[-1]
+        
+        # --- ここに通知したい条件を書く ---
+        # 例: RSIなどを計算してもOKですが、まずはシンプルに価格表示
+        return f"📈 **{name} ({ticker.replace('.T', '')})**\n現在値: {int(current_price)}円"
+
+    except Exception as e:
+        print(f"エラー ({name}): {e}")
+        return None
+
+def job():
+    """全銘柄をチェックして通知"""
+    messages = []
+    
+    for code, name in WATCH_LIST.items():
+        msg = check_stock(code, name)
+        if msg:
+            messages.append(msg)
+            
+    # メッセージがあればまとめて送信
+    if messages:
+        full_msg = "🤖 **定期株価チェック**\n" + "\n".join(messages)
+        send_discord(full_msg)
+        print("✅ 通知送信完了")
+    else:
+        print("市場データなし、または条件該当なし")
+
+# ==========================================
+# 🚀 実行エントリーポイント
+# ==========================================
 if __name__ == "__main__":
-    main()
+    # 日本時間を設定
+    JST = timezone(timedelta(hours=9))
+    now = datetime.now(JST)
+    current_time = now.strftime("%H:%M")
+    
+    print(f"🤖 システム起動: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # 平日の 09:00 〜 15:30 だけ動くように制限
+    # (GitHub Actionsは土日も動いてしまうため、ここで弾く)
+    weekday = now.weekday() # 0:月曜 〜 4:金曜
+    
+    if weekday <= 4 and "09:00" <= current_time <= "15:30":
+        print("🔍 市場オープン中。スキャンを開始します...")
+        job()
+    else:
+        print(f"💤 営業時間外です (現在: {current_time}, 曜日: {weekday})。終了します。")
