@@ -1,39 +1,31 @@
-name: Hybrid Stock Monitor
+name: Kabu Bot Auto Run
 
 on:
   schedule:
-    # --- 前場 (9:00 - 11:10) ---
-    # 9:00-10:55 (UTC 0:00-1:55)
-    - cron: '*/5 0-1 * * 1-5'
-    # 11:00-11:10 (UTC 2:00-2:10)
-    - cron: '0-10/5 2 * * 1-5'
-
-    # --- 後場 (12:30 - 14:40) ---
-    # 12:30-12:55 (UTC 3:30-3:55)
-    - cron: '30-55/5 3 * * 1-5'
-    # 13:00-13:55 (UTC 4:00-4:55)
-    - cron: '*/5 4 * * 1-5'
-    # 14:00-14:40 (UTC 5:00-5:40)
-    - cron: '0-40/5 5 * * 1-5'
-
-  workflow_dispatch:
+    # 15分ごとに実行
+    # UTC時間で記述 (日本の9:00はUTCの0:00)
+    # 月曜〜金曜の 日本時間 9:00〜16:00 の間だけトリガー
+    - cron: '*/15 0-7 * * 1-5'
+  workflow_dispatch: # 手動実行ボタンも有効化
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v3
-      
-      - name: Set up Python
+      - name: コードを取得
+        uses: actions/checkout@v3
+
+      - name: Pythonをセットアップ
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-          
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-        
-      - name: Run script
+
+      - name: ライブラリをインストール
+        run: |
+          pip install yfinance pandas requests
+
+      - name: ボットを実行
         env:
-          DISCORD_URL: ${{ secrets.DISCORD_URL }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
+          TZ: 'Asia/Tokyo'
         run: python main.py
