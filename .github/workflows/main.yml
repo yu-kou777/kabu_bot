@@ -1,31 +1,27 @@
-name: Kabu Bot Auto Run
+name: Stock Monitor 3min Logic
 
 on:
   schedule:
-    # 15分ごとに実行
-    # UTC時間で記述 (日本の9:00はUTCの0:00)
-    # 月曜〜金曜の 日本時間 9:00〜16:00 の間だけトリガー
-    - cron: '*/15 0-7 * * 1-5'
-  workflow_dispatch: # 手動実行ボタンも有効化
+    # 5分おきに実行 (GitHub Actions無料枠の限界頻度)
+    # 日本時間 09:00 - 11:15 (UTC 00:00 - 02:15)
+    - cron: '*/5 0-2 * * 1-5'
+    # 日本時間 12:30 - 14:55 (UTC 03:30 - 05:55)
+    - cron: '*/5 3-5 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: コードを取得
+      - name: Checkout
         uses: actions/checkout@v3
-
-      - name: Pythonをセットアップ
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      - name: ライブラリをインストール
-        run: |
-          pip install yfinance pandas requests
-
-      - name: ボットを実行
+      - name: Install Libs
+        run: pip install yfinance pandas requests
+      - name: Run Bot
         env:
           TZ: 'Asia/Tokyo'
         run: python main.py
