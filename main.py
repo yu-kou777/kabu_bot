@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 # ⚙️ 設定エリア
 # ==========================================
 # DiscordのURL
-DISCORD_WEBHOOK_URL = "ここにあなたのDiscordウェブフックURLを貼り付けてください"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 # ★ここにスプレッドシートIDを入力してください
 # (URLが https://docs.google.com/spreadsheets/d/abc12345/edit なら "abc12345" がID)
