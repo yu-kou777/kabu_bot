@@ -18,7 +18,7 @@ SHEET_ID = "1eNQr-uOb97YQsegYzQsegYzQsegYzQsegYz"  # ←ここをあなたのID�
 # 🧠 シート読み込み & 監視リスト作成
 # ==========================================
 def get_watch_list():
-    """スプレッドシートから監視銘柄リストを取得する"""
+    """1eNqR-uOb97YQsegYzQ_1y7b4ofsQE1zilu_jN2_0l8A"""
     print("📋 スプレッドシートから設定を読み込み中...")
     try:
         # CSVとしてダウンロードするURLを作成
