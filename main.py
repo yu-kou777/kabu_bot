@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
-DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1472281747000393902/Fbclh0R3R55w6ZnzhenJ24coaUPKy42abh3uPO-fRjfQulk9OwAq-Cf8cJQOe2U4SFme"
 SHEET_ID = "1eNQr-uOb97YQsegYzQsegYzQsegYzQsegYz"
 
 COOLDOWN_MINUTES = 60
