@@ -35,54 +35,93 @@ def send_discord(message):
     except:
         pass
 
-def save_watchlist(tickers):
-    with open(WATCHLIST_FILE, 'w') as f: json.dump(tickers, f)
-    st.session_state['current_watchlist'] = tickers
-
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, 'r') as f: return json.load(f)
-    return []
-
+# --- 指標計算 (フルスペック) ---
 def get_stock_data(ticker):
     try:
         df = yf.download(ticker, period="5d", interval="1m", progress=False)
         if df.empty or len(df) < 60: return None
-        df['MA60'] = ta.sma(df['Close'], length=60); df['MA200'] = ta.sma(df['Close'], length=200)
-        bb = ta.bbands(df['Close'], length=20, std=2); df['BB_up_2'] = bb['BBU_20_2.0']
-        bb3 = ta.bbands(df['Close'], length=20, std=3); df['BB_low_3'] = bb3['BBL_20_3.0']
+        
+        # 移動平均線
+        df['MA60'] = ta.sma(df['Close'], length=60)
+        df['MA200'] = ta.sma(df['Close'], length=200)
+        
+        # ボリンジャーバンド
+        bb = ta.bbands(df['Close'], length=20, std=2)
+        df['BB_up_2'] = bb['BBU_20_2.0']
+        bb3 = ta.bbands(df['Close'], length=20, std=3)
+        df['BB_low_3'] = bb3['BBL_20_3.0']
+        
+        # MACD
+        macd = ta.macd(df['Close'])
+        df['MACD'] = macd['MACD_12_26_9']
+        df['MACD_S'] = macd['MACDs_12_26_9']
+        
+        # 出来高移動平均 (20分平均)
+        df['VOL_MA'] = ta.sma(df['Volume'], length=20)
+        
+        # 平均足
+        ha = ta.ha(df['Open'], df['High'], df['Low'], df['Close'])
+        df['HA_O'] = ha['HA_open']
+        df['HA_C'] = ha['HA_close']
+        
         return df
     except: return None
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
-    # 友幸さんの6つの法則
+    
+    # 確信度フィルターの準備
+    is_ha_green = last['HA_C'] > last['HA_O'] # 平均足が陽線
+    is_macd_bullish = last['MACD'] > last['MACD_S'] # MACDがシグナルより上
+    is_vol_spike = last['Volume'] > last['VOL_MA'] * 1.5 # 出来高が平均の1.5倍
+    
+    # 法則1: 60MA上 & BB+2σ 3回接触
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
-        sigs.append("法則1:強気限界(売)")
+        confirm = "⚠️出来高増" if is_vol_spike else ""
+        sigs.append(f"法則1:強気限界(売) {confirm}")
+        
+    # 法則2: 60MA上 & 60MA反発/割れ
     if last['Close'] > last['MA60']:
-        if last['Low'] <= last['MA60']: sigs.append("法則2:60MA反発(買)")
-        if last['Close'] < last['MA60']: sigs.append("法則2:60MA割れ(売)")
+        if last['Low'] <= last['MA60']: 
+            if is_ha_green: sigs.append("法則2:60MA反発(買) ★平均足陽転")
+        if last['Close'] < last['MA60']: 
+            sigs.append("法則2:60MA割れ(売)")
+            
+    # 法則3: 200MA抵抗
     if last['MA200'] > last['MA60'] and last['High'] >= last['MA200']:
         sigs.append("法則3:200MA抵抗(売)")
+        
+    # 法則4: 60MA下 & BB-3σ反発
     if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
-        sigs.append("法則4:BB-3σ反発(買)")
+        confirm = "🔥大商い" if is_vol_spike else ""
+        sigs.append(f"法則4:BB-3σ反発(買) {confirm}")
+        
+    # 法則5: 200MA反発/割れ
     if last['Close'] < last['MA60']:
-        if last['Low'] <= last['MA200']: sigs.append("法則5:200MA反発(買)")
-        if last['Close'] < last['MA200']: sigs.append("法則5:200MA割れ(売)")
+        if last['Low'] <= last['MA200']: 
+            if is_macd_bullish: sigs.append("法則5:200MA反発(買) ★MACD好転")
+        if last['Close'] < last['MA200']: 
+            sigs.append("法則5:200MA割れ(売)")
+            
+    # 法則6: 60MA反発/突破
     if last['Close'] < last['MA60'] and last['High'] >= last['MA60']:
         sigs.append("法則6:60MA反発(売)")
     if last['Close'] > last['MA60'] and prev['Close'] < prev['MA60']:
-        sigs.append("法則6:60MA突破(買)")
+        if is_ha_green and is_macd_bullish:
+            sigs.append("法則6:60MA突破(買) ★最強転換")
+            
     return sigs
 
-# 状態初期化
-if 'current_watchlist' not in st.session_state: st.session_state['current_watchlist'] = load_watchlist()
+# --- 以下、UIとループ処理 (既存の成功ロジックを維持) ---
+if 'current_watchlist' not in st.session_state: 
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, 'r') as f: st.session_state['current_watchlist'] = json.load(f)
+    else: st.session_state['current_watchlist'] = []
 if 'monitoring' not in st.session_state: st.session_state['monitoring'] = False
 
-tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
+tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ フルスペック監視"])
 
 with tab1:
-    st.subheader("日足RSIスクリーニング")
     rsi_val = st.slider("抽出ライン(RSI)", 10, 60, 40)
     col1, col2 = st.columns(2)
     if col1.button("全銘柄スキャン開始"):
@@ -95,17 +134,22 @@ with tab1:
             rsi_s = ta.rsi(df_d['Close'], length=14)
             if rsi_s is not None and not rsi_s.empty:
                 curr_rsi = rsi_s.iloc[-1]
-                if curr_rsi <= rsi_val: found.append({"ticker": t, "rsi": curr_rsi, "price": df_daily['Close'].iloc[-1] if 'df_daily' in locals() else 0})
+                if curr_rsi <= rsi_val: found.append({"ticker": t, "rsi": curr_rsi, "price": df_d['Close'].iloc[-1]})
         st.session_state.found = found
-    if col2.button("リセット"): save_watchlist([]); st.rerun()
-
+    if col2.button("リセット"): 
+        with open(WATCHLIST_FILE, 'w') as f: json.dump([], f)
+        st.session_state['current_watchlist'] = []
+        st.rerun()
     if 'found' in st.session_state:
         selected = []
         for item in st.session_state.found:
-            t, r = item['ticker'], item['rsi']
-            st.info(f"**{t} {JPX400_DICT.get(t)}** | RSI: {r:.1f}")
+            t, r, p = item['ticker'], item['rsi'], item['price']
+            st.info(f"**{t} {JPX400_DICT.get(t)}** | 価格: {p:,.1f}円 | RSI: {r:.1f}")
             if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
-        if st.button("選定銘柄を保存"): save_watchlist(selected); st.success("保存完了")
+        if st.button("選定銘柄を保存"):
+            with open(WATCHLIST_FILE, 'w') as f: json.dump(selected, f)
+            st.session_state['current_watchlist'] = selected
+            st.success("保存完了")
 
 with tab2:
     watch_list = st.session_state['current_watchlist']
@@ -113,14 +157,10 @@ with tab2:
     else:
         st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
         c1, c2 = st.columns(2)
-        
-        # スタートボタン
         if c1.button("▶️ 監視スタート", disabled=st.session_state.monitoring):
             st.session_state.monitoring = True
-            send_discord("▶️ 友幸さんの株AI監視を開始しました。")
+            send_discord("▶️ 友幸さんの【フルスペック監視】を開始しました。")
             st.rerun()
-            
-        # 強制停止ボタン
         if c2.button("⚠️ 強制停止", type="primary", disabled=not st.session_state.monitoring):
             st.session_state.monitoring = False
             send_discord("⏹️ 友幸さんにより、監視が強制停止されました。")
@@ -130,9 +170,8 @@ with tab2:
             placeholder = st.empty()
             while st.session_state.monitoring:
                 now = datetime.now()
-                # 監視時間判定
                 if dt_time(9, 20) <= now.time() <= dt_time(15, 20):
-                    placeholder.info(f"🚀 監視中... ({now.strftime('%H:%M:%S')})")
+                    placeholder.info(f"🚀 フル監視実行中... ({now.strftime('%H:%M:%S')})")
                     for t in watch_list:
                         df = get_stock_data(t)
                         if df is not None:
@@ -140,23 +179,18 @@ with tab2:
                             if sigs:
                                 send_discord(f"🔔 **{t} {JPX400_DICT.get(t)}**\n{', '.join(sigs)}")
                                 st.toast(f"{t} 検知")
-                    # 3分間の待機（1秒ごとに停止・時間チェック）
                     for i in range(180, 0, -1):
                         time.sleep(1)
-                        # 待機中に停止ボタンが押されたか、時間が過ぎたかをチェック
                         if not st.session_state.monitoring: break
                         check_now = datetime.now().time()
-                        if not (dt_time(9, 20) <= check_now <= dt_time(15, 20)):
-                            break
-                        placeholder.info(f"⏳ 次のスキャンまで残り {i} 秒...")
+                        if not (dt_time(9, 20) <= check_now <= dt_time(15, 20)): break
+                        placeholder.info(f"⏳ 次の精密スキャンまで残り {i} 秒...")
                 else:
-                    # 時間外の場合：10秒カウントダウンして強制終了
                     for i in range(10, 0, -1):
-                        placeholder.error(f"🕒 監視時間外です。{i}秒後に自動停止し通知します。")
+                        placeholder.error(f"🕒 監視時間外です。{i}秒後に自動停止します。")
                         time.sleep(1)
-                        if not st.session_state.monitoring: break # 途中で停止ボタンが押された場合
-                    
                     st.session_state.monitoring = False
-                    send_discord("🕒 監視時間外のため、本日の監視を自動終了しました。明日09:20に自動再開予約済。")
+                    send_discord("🕒 監視時間外のため自動終了しました。明日09:20に自動再開。")
                     st.rerun()
                     break
+
