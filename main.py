@@ -14,7 +14,7 @@ import time
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 
-# 主要な日経400銘柄（スキャン対象）
+# 日経400銘柄リスト（一部抜粋。必要に応じて追加可能）
 JPX400_ALL = [
     '1605.T', '1801.T', '1802.T', '1812.T', '1925.T', '1928.T', '2502.T', '2503.T', '2802.T', '2914.T',
     '3402.T', '3407.T', '4063.T', '4188.T', '4452.T', '4502.T', '4503.T', '4507.T', '4519.T', '4523.T',
@@ -42,11 +42,12 @@ def load_watchlist():
             return json.load(f)
     return []
 
-# --- データ取得・判定（Jackの6つの法則） ---
-def get_stock_data(ticker):
+# --- データ取得・判定 ---
+def get_stock_data(ticker, period="5d", interval="1m"):
     try:
-        df = yf.download(ticker, period="5d", interval="1m", progress=False)
-        if df.empty: return None
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if df is None or df.empty or len(df) < 60: return None
+        # テクニカル指標
         df['MA60'] = ta.sma(df['Close'], length=60)
         df['MA200'] = ta.sma(df['Close'], length=200)
         bb2 = ta.bbands(df['Close'], length=20, std=2)
@@ -58,6 +59,7 @@ def get_stock_data(ticker):
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
+    # 6つの法則
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1: 強気限界(売)")
     if last['Close'] > last['MA60']:
@@ -80,25 +82,27 @@ def judge_jack_laws(df, ticker):
 # 📱 UI
 # ==========================================
 st.title("📉 Jack株AI：選別と3分監視")
-
-# 監視銘柄の記憶を読み込み
 current_watchlist = load_watchlist()
-
 tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
 
 with tab1:
     st.subheader("日足RSIスクリーニング")
-    rsi_val = st.slider("抽出するRSI（30以下推奨）", 10, 40, 30)
-    
+    rsi_val = st.slider("抽出するRSI", 10, 40, 30)
     col1, col2 = st.columns(2)
+    
     if col1.button("全銘柄スキャン開始"):
         found = []
         bar = st.progress(0)
         for i, t in enumerate(JPX400_ALL):
             bar.progress((i + 1) / len(JPX400_ALL))
-            d_df = yf.download(t, period="20d", interval="1d", progress=False)
-            if d_df.empty: continue
-            rsi = ta.rsi(d_df['Close'], length=14).iloc[-1]
+            d_df = yf.download(t, period="30d", interval="1d", progress=False)
+            # エラー防止：データが足りない場合は飛ばす
+            if d_df is None or d_df.empty or len(d_df) < 20: continue
+            
+            rsi_series = ta.rsi(d_df['Close'], length=14)
+            if rsi_series is None or rsi_series.empty: continue
+            
+            rsi = rsi_series.iloc[-1]
             if rsi <= rsi_val:
                 found.append({"ticker": t, "rsi": rsi})
         st.session_state.found = found
@@ -126,7 +130,7 @@ with tab1:
 
 with tab2:
     if not current_watchlist:
-        st.warning("監視銘柄が登録されていません。夜の選別タブで登録してください。")
+        st.warning("監視銘柄が登録されていません。")
     else:
         st.write(f"📋 現在の監視銘柄: {', '.join(current_watchlist)}")
         if st.button("3分刻み監視スタート"):
@@ -135,7 +139,7 @@ with tab2:
                 now = datetime.now().time()
                 if dt_time(9, 20) <= now <= dt_time(15, 20):
                     now_str = datetime.now().strftime('%H:%M:%S')
-                    placeholder.info(f"監視中... 次のスキャンは3分後 ({now_str})")
+                    placeholder.info(f"監視中... 次のスキャンまで待機中 ({now_str})")
                     for t in current_watchlist:
                         df = get_stock_data(t)
                         if df is not None:
