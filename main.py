@@ -59,7 +59,7 @@ def get_stock_data(ticker):
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
-    # 画像[1772022948715.jpeg]の最新アルゴを反映
+    # 友幸さんの最新アルゴ を反映
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1:強気限界(売)")
     if last['Close'] > last['MA60']:
@@ -131,10 +131,10 @@ with tab2:
     else:
         st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
         c1, c2 = st.columns(2)
-        if c1.button("監視スタート", disabled=st.session_state.monitoring):
+        if c1.button("監視スタート", key="start_btn", disabled=st.session_state.monitoring):
             st.session_state.monitoring = True
             st.rerun()
-        if c2.button("⚠️ 強制停止", type="primary", disabled=not st.session_state.monitoring):
+        if c2.button("⚠️ 強制停止", key="stop_btn", type="primary", disabled=not st.session_state.monitoring):
             st.session_state.monitoring = False
             st.rerun()
 
@@ -152,15 +152,16 @@ with tab2:
                             if sigs:
                                 requests.post(DISCORD_URL, json={"content": f"🔔 **{t} {JPX400_DICT.get(t)}**\n{', '.join(sigs)}"})
                                 st.toast(f"{t} 検知")
-                    # 3分待機中のカウントダウン
+                    # カウントダウン待機
                     for i in range(180, 0, -1):
                         if not st.session_state.monitoring: break
                         placeholder.info(f"⏳ 次のスキャンまで残り {i} 秒...")
                         time.sleep(1)
                 else:
-                    # 時間外は10秒で停止
+                    # 【重要】時間外は10秒カウントダウン後に状態を強制リセット
                     for i in range(10, 0, -1):
-                        placeholder.warning(f"🕒 時間外です。{i}秒後に自動停止します。明日09:20に再開予約済。")
+                        placeholder.warning(f"🕒 監視時間外です。{i}秒後に自動停止します。明日09:20に自動再開予約済。")
                         time.sleep(1)
                     st.session_state.monitoring = False
-                    st.rerun()
+                    st.rerun() # ここで確実にアプリを「停止状態」で再読み込みさせる
+                    break
