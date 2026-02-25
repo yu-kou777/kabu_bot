@@ -59,6 +59,7 @@ def get_stock_data(ticker):
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
+    # 画像[1772022948715.jpeg]の最新アルゴを反映
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1:強気限界(売)")
     if last['Close'] > last['MA60']:
@@ -91,7 +92,6 @@ tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
 with tab1:
     st.subheader("日足RSIスクリーニング")
     rsi_val = st.slider("抽出ライン(RSI)", 10, 60, 40)
-    
     col1, col2 = st.columns(2)
     if col1.button("全銘柄スキャン開始"):
         found = []
@@ -107,20 +107,17 @@ with tab1:
                 if curr_rsi <= rsi_val:
                     found.append({"ticker": t, "rsi": curr_rsi, "price": df_daily['Close'].iloc[-1]})
         st.session_state.found = found
-
     if col2.button("監視リストをリセット"):
         save_watchlist([])
         st.rerun()
 
     if 'found' in st.session_state:
-        st.success(f"{len(st.session_state.found)} 件ヒット")
         selected = []
         for item in st.session_state.found:
             t, r, p = item['ticker'], item['rsi'], item['price']
-            name = JPX400_DICT.get(t, "")
             with st.container():
                 st.markdown(f"<div style='background-color:#E6F3FF; padding:10px; border-radius:5px; margin-bottom:5px;'>", unsafe_allow_html=True)
-                st.write(f"**{t} {name}** | RSI: {r:.1f} | 価格: {p:,.1f}円")
+                st.write(f"**{t} {JPX400_DICT.get(t)}** | RSI: {r:.1f} | 価格: {p:,.1f}円")
                 if st.checkbox(f"監視登録", value=True, key=f"sel_{t}"): selected.append(t)
                 st.markdown("</div>", unsafe_allow_html=True)
         if st.button("この銘柄で監視を開始"):
@@ -133,7 +130,6 @@ with tab2:
         st.warning("監視銘柄がありません。")
     else:
         st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
-        
         c1, c2 = st.columns(2)
         if c1.button("監視スタート", disabled=st.session_state.monitoring):
             st.session_state.monitoring = True
@@ -156,13 +152,15 @@ with tab2:
                             if sigs:
                                 requests.post(DISCORD_URL, json={"content": f"🔔 **{t} {JPX400_DICT.get(t)}**\n{', '.join(sigs)}"})
                                 st.toast(f"{t} 検知")
-                    time.sleep(180)
+                    # 3分待機中のカウントダウン
+                    for i in range(180, 0, -1):
+                        if not st.session_state.monitoring: break
+                        placeholder.info(f"⏳ 次のスキャンまで残り {i} 秒...")
+                        time.sleep(1)
                 else:
-                    # 時間外の処理
+                    # 時間外は10秒で停止
+                    for i in range(10, 0, -1):
+                        placeholder.warning(f"🕒 時間外です。{i}秒後に自動停止します。明日09:20に再開予約済。")
+                        time.sleep(1)
                     st.session_state.monitoring = False
-                    placeholder.warning("🕒 時間外です。明日の 09:20 に自動再開するよう予約しました。")
-                    # 翌日の日付を計算
-                    target_date = (now + timedelta(days=1)).strftime('%Y-%m-%d')
-                    # システムへスケジューリングの指示を出す（モデル内部で管理）
-                    time.sleep(5)
                     st.rerun()
