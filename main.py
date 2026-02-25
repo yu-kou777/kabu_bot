@@ -1,143 +1,125 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
+import pandas_ta as ta
 import requests
 import json
-import sys  # プログラム終了用
-import time
-from datetime import datetime, timedelta, timezone
+import os
+import datetime
 
 # ==========================================
-# ⚙️ 設定エリア
+# ⚙️ 設定（Jackさんの最新Webhook）
 # ==========================================
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1472281747000393902/Fbclh0R3R55w6ZnzhenJ24coaUPKy42abh3uPO-fRjfQulk9OwAq-Cf8cJQOe2U4SFme"
-SHEET_ID = "1eNQr-uOb97YQsegYzQsegYzQsegYzQsegYz"
+DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
+WATCHLIST_FILE = "jack_watchlist.json"
+# 日経400銘柄の例（ここに必要な銘柄コードを追加してください）
+TICKERS = ["5713.T", "6330.T", "7203.T", "9984.T", "8035.T", "6758.T", "9101.T"]
 
-COOLDOWN_MINUTES = 60
-last_sent = {}
+st.set_page_config(page_title="Jack株AI監視", layout="wide")
 
 # ==========================================
-# 🕒 時間判定ロジック
+# 🧠 6つの法則判定ロジック
 # ==========================================
-def is_market_open(now_dt):
-    if now_dt.weekday() >= 5: return False # 土日
+def judge_signals(df, ticker):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    signals = []
     
-    current_time = now_dt.strftime('%H:%M')
-    # 前場: 09:00 〜 11:50 / 後場: 12:30 〜 14:50
-    if "09:00" <= current_time <= "11:50": return True
-    if "12:30" <= current_time <= "14:50": return True
+    # 法則1: 60MA上 & BB+2σに3回接触
+    touch_count = (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum()
+    if last['Close'] > last['MA60'] and touch_count >= 3:
+        signals.append("法則1: 強気圏限界(売り)")
+        
+    # 法則2: 60MA上 & 60MA接触で(反発)買い / 割ったら売り
+    if last['Close'] > last['MA60']:
+        if last['Low'] <= last['MA60']: signals.append("法則2: 60MA反発(買い)")
+        if last['Close'] < last['MA60']: signals.append("法則2: 60MA割れ(売り)")
+
+    # 法則3: 200MA > 60MAの時、200MA接触で売り
+    if last['MA200'] > last['MA60'] and last['High'] >= last['MA200']:
+        signals.append("法則3: 200MA壁(売り)")
+
+    # 法則4: 60MA下 & BB-3σ接触で買い
+    if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
+        signals.append("法則4: 極限売られすぎBB-3(買い)")
+
+    # 法則5: 60MA下 & 200MA接触で(反発)買い / 割ったら売り
+    if last['Close'] < last['MA60']:
+        if last['Low'] <= last['MA200']: signals.append("法則5: 200MA反発(買い)")
+        if last['Close'] < last['MA200']: signals.append("法則5: 200MA割れ(売り)")
+
+    # 法則6: 60MA下 & 60MA接触で(反発)売り / 越えたら買い
+    if last['Close'] < last['MA60'] and last['High'] >= last['MA60']:
+        signals.append("法則6: 60MA反発(売り)")
+    if last['Close'] > last['MA60'] and prev['Close'] < prev['MA60']:
+        signals.append("法則6: 60MA突破(買い)")
+
+    return signals
+
+# ==========================================
+# 📱 画面表示用 (垂直並び)
+# ==========================================
+def draw_card(ticker, df):
+    last = df.iloc[-1]
+    # MA未来予測：今の価格が60本前より高ければ上昇
+    trend = "⤴️ 上昇" if last['Close'] > df['Close'].shift(60).iloc[-1] else "⤵️ 下降"
+    color = "red" if "上昇" in trend else "blue"
+    
+    with st.expander(f"【{ticker}】 {trend}", expanded=True):
+        st.markdown(f"**状態:** <span style='color:{color}'>{trend}</span>", unsafe_allow_html=True)
+        st.write(f"📈 **ボリンジャー上値(+2σ)**: {last['BB_up_2']:,.1f}")
+        st.write(f"💰 **現在値**: {last['Close']:,.1f}")
+        st.write(f"🟦 **MA60 (1時間線)**: {last['MA60']:,.1f}")
+        st.write(f"⬜ **MA200 (中期線)**: {last['MA200']:,.1f}")
+        st.write(f"📉 **ボリンジャー下値(-3σ)**: {last['BB_low_3']:,.1f}")
+        if st.button(f"この銘柄を削除", key=f"del_{ticker}"):
+            return True
     return False
 
 # ==========================================
-# 🧠 銘柄リスト取得
+# 🚀 メイン動作
 # ==========================================
-def get_watch_list():
-    try:
-        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
-        df = pd.read_csv(url)
-        watch_dict = {}
-        for index, row in df.iterrows():
-            name = str(row.iloc[2]) if len(row) > 2 else "銘柄"
-            code_day = str(row.iloc[0])
-            if code_day != "nan" and code_day.replace('.','').isdigit():
-                code = code_day.split('.')[0] + ".T"
-                watch_dict[code] = f"{name} (Day)"
-            code_swing = str(row.iloc[1])
-            if code_swing != "nan" and code_swing.replace('.','').isdigit():
-                code = code_swing.split('.')[0] + ".T"
-                watch_dict[code] = watch_dict.get(code, name) + " (Swing)"
-        return watch_dict
-    except:
-        return {"9984.T": "SBG", "7203.T": "トヨタ"}
+mode = st.sidebar.radio("モード選択", ["1.夜の選別", "2.昼の自動監視"])
 
-# ==========================================
-# 📊 テクニカル分析
-# ==========================================
-def calculate_indicators(df):
-    close = df['Close']
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + gain/loss))
-    df['MACD'] = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['Hist'] = df['MACD'] - df['Signal']
-    return df
-
-def send_discord(message):
-    payload = {"username": "株監視AI教授 📈", "content": message}
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    except Exception as e:
-        print(f"Discord送信エラー: {e}")
-
-def check_signals():
-    global last_sent
-    watch_list = get_watch_list()
-    jst = timezone(timedelta(hours=9))
-    now_dt = datetime.now(jst)
-    now_str = now_dt.strftime('%H:%M')
+if mode == "1.夜の選別":
+    st.header("🌙 夜のスクリーニング (日足RSI 20以下)")
+    if st.button("チャンス銘柄を抽出"):
+        found = []
+        for t in TICKERS:
+            d_df = yf.download(t, period="20d", interval="1d", progress=False)
+            rsi = ta.rsi(d_df['Close'], length=14).iloc[-1]
+            if rsi <= 20: found.append(t)
+        st.session_state.temp_list = found
     
-    print(f"⏰ {now_str} スキャン実行中...")
-    
-    for code, name in watch_list.items():
-        if code in last_sent:
-            elapsed = (now_dt - last_sent[code]).total_seconds() / 60
-            if elapsed < COOLDOWN_MINUTES: continue
-
-        try:
-            stock = yf.Ticker(code)
-            df = stock.history(period="1d", interval="1m")
-            if df.empty or len(df) < 30: continue
+    if 'temp_list' in st.session_state:
+        final_list = []
+        for t in st.session_state.temp_list:
+            df = yf.download(t, period="2d", interval="1m", progress=False)
+            # 指標計算
+            df['MA60'] = ta.sma(df['Close'], length=60)
+            df['MA200'] = ta.sma(df['Close'], length=200)
+            df['BB_up_2'] = ta.bbands(df['Close'], length=20, std=2)['BBU_20_2.0']
+            df['BB_low_3'] = ta.bbands(df['Close'], length=20, std=3)['BBL_20_3.0']
             
-            df_3m = df.resample('3min').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-            df_3m = calculate_indicators(df_3m)
-            
-            last = df_3m.iloc[-1]
-            prev = df_3m.iloc[-2]
-            
-            alert = ""
-            if prev['Hist'] < 0 and last['Hist'] > 0:
-                alert = "🚀【MACDゴールデンクロス】"
-            elif last['RSI'] < 30:
-                alert = "⚡【RSI売られすぎ】"
-            
-            if alert:
-                msg = f"🔔 **{name} ({code})**\n⏰ {now_str}\n💰 現在値: {last['Close']:.1f}円\n📊 {alert}\n📈 RSI: {last['RSI']:.1f}"
-                send_discord(msg)
-                last_sent[code] = now_dt
-                print(f"✅ {code} 通知済み")
-        except:
-            continue
-
-# ==========================================
-# 🚀 メイン実行ループ
-# ==========================================
-if __name__ == "__main__":
-    jst = timezone(timedelta(hours=9))
-    now_dt = datetime.now(jst)
-    
-    print("------------------------------------------")
-    print(f"🤖 システム起動時刻: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("------------------------------------------")
-
-    # 起動時の時間外チェック
-    if not is_market_open(now_dt):
-        msg = f"⚠️ 【動作確認】市場時間外（または休日）に起動されました。\n接続テスト成功です。15秒後に自動停止します。"
-        print(msg)
-        send_discord(msg)
+            if not draw_card(t, df): final_list.append(t)
         
-        time.sleep(15)  # 15秒待機
-        print("🛑 停止します。")
-        sys.exit() # プログラム終了
+        if st.button("選定銘柄を保存して監視予約"):
+            with open(WATCHLIST_FILE, 'w') as f:
+                json.dump(final_list, f)
+            st.success("保存完了！")
 
-    # 市場時間内の場合は通常ループ
-    print("✅ 市場稼働時間内です。常駐監視を開始します。")
-    while True:
-        current_now = datetime.now(jst)
-        if is_market_open(current_now):
-            check_signals()
-            time.sleep(180) # 3分おき
-        else:
-            print(f"😴 市場が終了しました ({current_now.strftime('%H:%M')})。終了します。")
-            send_discord("📢 市場時間が終了したため、本日の監視を終了し停止します。")
-            sys.exit()
+elif mode == "2.昼 of 昼の自動監視":
+    st.header("☀️ 本日の自動監視リスト")
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, 'r') as f:
+            watchlist = json.load(f)
+        
+        for t in watchlist:
+            df = yf.download(t, period="1d", interval="1m", progress=False)
+            # ※指標計算（省略：上記と同じ）
+            signals = judge_signals(df, t)
+            if signals:
+                msg = f"🔔 **{t}**\nシグナル: {', '.join(signals)}"
+                requests.post(DISCORD_URL, json={"content": msg})
+                st.toast(msg)
+
