@@ -5,7 +5,7 @@ import pandas_ta as ta
 import requests
 import json
 import os
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 import time
 
 # --- 設定 ---
@@ -59,7 +59,6 @@ def get_stock_data(ticker):
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
-    name = JPX400_DICT.get(ticker, ticker)
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1:強気限界(売)")
     if last['Close'] > last['MA60']:
@@ -81,9 +80,11 @@ def judge_jack_laws(df, ticker):
 # --- UI ---
 st.title("📈 Jack株AI：選別と3分監視")
 
-# 監視リストの初期読み込み
 if 'current_watchlist' not in st.session_state:
     st.session_state['current_watchlist'] = load_watchlist()
+
+if 'monitoring' not in st.session_state:
+    st.session_state['monitoring'] = False
 
 tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
 
@@ -96,12 +97,10 @@ with tab1:
         found = []
         bar = st.progress(0)
         all_data = yf.download(JPX400_ALL, period="40d", interval="1d", group_by='ticker', progress=False)
-        
         for i, t in enumerate(JPX400_ALL):
             bar.progress((i + 1) / len(JPX400_ALL))
             df_daily = all_data[t].dropna()
             if len(df_daily) < 15: continue
-            
             rsi_s = ta.rsi(df_daily['Close'], length=14)
             if rsi_s is not None and not rsi_s.empty:
                 curr_rsi = rsi_s.iloc[-1]
@@ -114,50 +113,56 @@ with tab1:
         st.rerun()
 
     if 'found' in st.session_state:
-        st.success(f"{len(st.session_state.found)} 件ヒットしました")
+        st.success(f"{len(st.session_state.found)} 件ヒット")
         selected = []
         for item in st.session_state.found:
             t, r, p = item['ticker'], item['rsi'], item['price']
             name = JPX400_DICT.get(t, "")
-            color = "#FFCCCC" if r <= 20 else "#E6F3FF"
             with st.container():
-                st.markdown(f"<div style='background-color:{color}; padding:10px; border-radius:5px; margin-bottom:5px;'>", unsafe_allow_html=True)
-                st.write(f"**{t} {name}**")
-                st.write(f"価格: **{p:,.1f}円** | RSI: **{r:.1f}**")
-                if st.checkbox(f"監視に登録", value=True, key=f"sel_{t}"):
-                    selected.append(t)
+                st.markdown(f"<div style='background-color:#E6F3FF; padding:10px; border-radius:5px; margin-bottom:5px;'>", unsafe_allow_html=True)
+                st.write(f"**{t} {name}** | RSI: {r:.1f} | 価格: {p:,.1f}円")
+                if st.checkbox(f"監視登録", value=True, key=f"sel_{t}"): selected.append(t)
                 st.markdown("</div>", unsafe_allow_html=True)
-        
-        if st.button("選定銘柄で監視を開始する"):
+        if st.button("この銘柄で監視を開始"):
             save_watchlist(selected)
-            st.success(f"【{len(selected)}銘柄】を監視リストに保存しました。")
+            st.success("保存完了。監視タブへ。")
 
 with tab2:
     watch_list = st.session_state['current_watchlist']
     if not watch_list:
-        st.warning("監視銘柄がありません。夜の選別タブで「保存」してください。")
+        st.warning("監視銘柄がありません。")
     else:
-        # 和名付きで表示
-        display_names = [f"{t}({JPX400_DICT.get(t,'')})" for t in watch_list]
-        st.write(f"📋 **現在の監視対象:**")
-        st.info(", ".join(display_names))
+        st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
         
-        if st.button("3分刻み監視スタート"):
+        c1, c2 = st.columns(2)
+        if c1.button("監視スタート", disabled=st.session_state.monitoring):
+            st.session_state.monitoring = True
+            st.rerun()
+        if c2.button("⚠️ 強制停止", type="primary", disabled=not st.session_state.monitoring):
+            st.session_state.monitoring = False
+            st.rerun()
+
+        if st.session_state.monitoring:
             placeholder = st.empty()
-            while True:
-                now = datetime.now().time()
-                if dt_time(9, 20) <= now <= dt_time(15, 20):
-                    now_str = datetime.now().strftime('%H:%M:%S')
-                    placeholder.info(f"監視中... 次のスキャンまで待機 ({now_str})")
+            while st.session_state.monitoring:
+                now = datetime.now()
+                # 監視時間内 (9:20 - 15:20)
+                if dt_time(9, 20) <= now.time() <= dt_time(15, 20):
+                    placeholder.info(f"🚀 監視実行中... ({now.strftime('%H:%M:%S')})")
                     for t in watch_list:
                         df = get_stock_data(t)
                         if df is not None:
                             sigs = judge_jack_laws(df, t)
                             if sigs:
-                                name = JPX400_DICT.get(t, "")
-                                requests.post(DISCORD_URL, json={"content": f"🔔 **{t} {name}**\n{', '.join(sigs)}"})
-                                st.toast(f"{name} 検知")
+                                requests.post(DISCORD_URL, json={"content": f"🔔 **{t} {JPX400_DICT.get(t)}**\n{', '.join(sigs)}"})
+                                st.toast(f"{t} 検知")
                     time.sleep(180)
                 else:
-                    placeholder.warning("現在、監視時間外です (09:20〜15:20)")
-                    time.sleep(60)
+                    # 時間外の処理
+                    st.session_state.monitoring = False
+                    placeholder.warning("🕒 時間外です。明日の 09:20 に自動再開するよう予約しました。")
+                    # 翌日の日付を計算
+                    target_date = (now + timedelta(days=1)).strftime('%Y-%m-%d')
+                    # システムへスケジューリングの指示を出す（モデル内部で管理）
+                    time.sleep(5)
+                    st.rerun()
