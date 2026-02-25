@@ -32,8 +32,8 @@ st.set_page_config(page_title="Jack株AI監視", layout="centered")
 def send_discord(message):
     try:
         requests.post(DISCORD_URL, json={"content": message})
-    except Exception as e:
-        st.error(f"Discord送信エラー: {e}")
+    except:
+        pass
 
 def save_watchlist(tickers):
     with open(WATCHLIST_FILE, 'w') as f: json.dump(tickers, f)
@@ -56,6 +56,7 @@ def get_stock_data(ticker):
 
 def judge_jack_laws(df, ticker):
     last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
+    # 友幸さんの6つの法則
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1:強気限界(売)")
     if last['Close'] > last['MA60']:
@@ -80,6 +81,7 @@ if 'monitoring' not in st.session_state: st.session_state['monitoring'] = False
 tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
 
 with tab1:
+    st.subheader("日足RSIスクリーニング")
     rsi_val = st.slider("抽出ライン(RSI)", 10, 60, 40)
     col1, col2 = st.columns(2)
     if col1.button("全銘柄スキャン開始"):
@@ -94,18 +96,26 @@ with tab1:
                 curr_rsi = rsi_s.iloc[-1]
                 if curr_rsi <= rsi_val: found.append({"ticker": t, "rsi": curr_rsi, "price": df_d['Close'].iloc[-1]})
         st.session_state.found = found
-    if col2.button("リセット"): save_watchlist([]); st.rerun()
+    if col2.button("リセット"): 
+        save_watchlist([])
+        if 'found' in st.session_state: del st.session_state.found
+        st.rerun()
+
     if 'found' in st.session_state:
+        st.success(f"{len(st.session_state.found)} 件ヒット")
         selected = []
         for item in st.session_state.found:
             t, r, p = item['ticker'], item['rsi'], item['price']
-            st.markdown(f"<div style='background-color:#E6F3FF; padding:10px; border-radius:5px;'>**{t} {JPX400_DICT.get(t)}** | 価格: {p:,.1f}円 | RSI: {r:.1f}</div>", unsafe_allow_html=True)
-            if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
+            # UI崩れ対策: Streamlit標準のinfoボックスを使用し、色付きカードを廃止
+            with st.container():
+                st.info(f"**{t} {JPX400_DICT.get(t)}**\n\n価格: {p:,.1f}円 | RSI: {r:.1f}")
+                if st.checkbox(f"監視に登録", value=True, key=f"sel_{t}"): selected.append(t)
+                st.write("---")
         if st.button("選定銘柄を保存"): save_watchlist(selected); st.success("保存完了")
 
 with tab2:
     watch_list = st.session_state['current_watchlist']
-    if not watch_list: st.warning("銘柄がありません。")
+    if not watch_list: st.warning("監視銘柄がありません。")
     else:
         st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
         c1, c2 = st.columns(2)
@@ -137,10 +147,12 @@ with tab2:
                         placeholder.info(f"⏳ 次のスキャンまで残り {i} 秒...")
                         time.sleep(1)
                 else:
+                    # 時間外停止の即時実行
                     for i in range(10, 0, -1):
-                        placeholder.warning(f"🕒 時間外です。{i}秒後に停止し、Discordに通知します。")
+                        placeholder.warning(f"🕒 監視時間外(0:00)です。{i}秒後に停止し、Discordに通知します。")
                         time.sleep(1)
                     st.session_state.monitoring = False
                     send_discord("🕒 監視時間外のため、本日の監視を自動終了しました。明日09:20に自動再開予約済。")
                     st.rerun()
                     break
+
