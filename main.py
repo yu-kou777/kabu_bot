@@ -9,12 +9,12 @@ from datetime import datetime, time as dt_time
 import time
 
 # ==========================================
-# ⚙️ 設定（Jackさん専用設定）
+# ⚙️ 設定
 # ==========================================
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 
-# JPX日経400銘柄（代表的な銘柄を網羅。必要に応じて '数字4桁.T' を追加してください）
+# 主要な日経400銘柄（スキャン対象）
 JPX400_ALL = [
     '1605.T', '1801.T', '1802.T', '1812.T', '1925.T', '1928.T', '2502.T', '2503.T', '2802.T', '2914.T',
     '3402.T', '3407.T', '4063.T', '4188.T', '4452.T', '4502.T', '4503.T', '4507.T', '4519.T', '4523.T',
@@ -31,12 +31,21 @@ JPX400_ALL = [
 
 st.set_page_config(page_title="Jack株AI監視", layout="centered")
 
-# ==========================================
-# 🧠 テクニカル・判定ロジック
-# ==========================================
-def get_stock_data(ticker, period="5d", interval="1m"):
+# --- 保存・読み込み機能 ---
+def save_watchlist(tickers):
+    with open(WATCHLIST_FILE, 'w') as f:
+        json.dump(tickers, f)
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+# --- データ取得・判定（Jackの6つの法則） ---
+def get_stock_data(ticker):
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        df = yf.download(ticker, period="5d", interval="1m", progress=False)
         if df.empty: return None
         df['MA60'] = ta.sma(df['Close'], length=60)
         df['MA200'] = ta.sma(df['Close'], length=200)
@@ -45,59 +54,44 @@ def get_stock_data(ticker, period="5d", interval="1m"):
         bb3 = ta.bbands(df['Close'], length=20, std=3)
         df['BB_low_3'] = bb3['BBL_20_3.0']
         return df
-    except:
-        return None
+    except: return None
 
 def judge_jack_laws(df, ticker):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    sigs = []
-    
-    # 法則1: 60MA上 & BB+2σ 3回接触
+    last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append("法則1: 強気限界(売)")
-    
-    # 法則2: 60MA上 & 60MA反発(買)/割れ(売)
     if last['Close'] > last['MA60']:
         if last['Low'] <= last['MA60']: sigs.append("法則2: 60MA反発(買)")
         if last['Close'] < last['MA60']: sigs.append("法則2: 60MA割れ(売)")
-        
-    # 法則3: 200MA抵抗(売)
     if last['MA200'] > last['MA60'] and last['High'] >= last['MA200']:
         sigs.append("法則3: 200MA抵抗(売)")
-        
-    # 法則4: BB-3σ反発(買)
     if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
         sigs.append("法則4: BB-3σ反発(買)")
-        
-    # 法則5: 200MA反発(買)/割れ(売)
     if last['Close'] < last['MA60']:
         if last['Low'] <= last['MA200']: sigs.append("法則5: 200MA反発(買)")
         if last['Close'] < last['MA200']: sigs.append("法則5: 200MA割れ(売)")
-        
-    # 法則6: 60MA反発(売)/突破(買)
     if last['Close'] < last['MA60'] and last['High'] >= last['MA60']:
         sigs.append("法則6: 60MA反発(売)")
     if last['Close'] > last['MA60'] and prev['Close'] < prev['MA60']:
         sigs.append("法則6: 60MA突破(買)")
-        
     return sigs
 
-def is_watch_time():
-    now = datetime.now().time()
-    return dt_time(9, 20) <= now <= dt_time(15, 20)
+# ==========================================
+# 📱 UI
+# ==========================================
+st.title("📉 Jack株AI：選別と3分監視")
 
-# ==========================================
-# 📱 画面構成
-# ==========================================
-st.title("📈 Jack株AI：選別と3分監視")
+# 監視銘柄の記憶を読み込み
+current_watchlist = load_watchlist()
+
 tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 3分刻み監視"])
 
 with tab1:
     st.subheader("日足RSIスクリーニング")
-    target_rsi = st.slider("RSI抽出ライン", 10, 40, 30)
+    rsi_val = st.slider("抽出するRSI（30以下推奨）", 10, 40, 30)
     
-    if st.button("全銘柄スキャン開始"):
+    col1, col2 = st.columns(2)
+    if col1.button("全銘柄スキャン開始"):
         found = []
         bar = st.progress(0)
         for i, t in enumerate(JPX400_ALL):
@@ -105,51 +99,51 @@ with tab1:
             d_df = yf.download(t, period="20d", interval="1d", progress=False)
             if d_df.empty: continue
             rsi = ta.rsi(d_df['Close'], length=14).iloc[-1]
-            if rsi <= target_rsi:
+            if rsi <= rsi_val:
                 found.append({"ticker": t, "rsi": rsi})
         st.session_state.found = found
     
+    if col2.button("監視リストをリセット"):
+        save_watchlist([])
+        st.rerun()
+
     if 'found' in st.session_state:
-        final_list = []
+        st.write(f"### {len(st.session_state.found)} 件見つかりました")
+        selected = []
         for item in st.session_state.found:
             t, r = item['ticker'], item['rsi']
             color = "#FFCCCC" if r <= 20 else "#E6F3FF"
-            label = "🔥【超チャンス】" if r <= 20 else "✅【注目】"
-            
-            st.markdown(f"<div style='background-color:{color}; padding:10px; border-radius:5px;'>", unsafe_allow_html=True)
-            df = get_stock_data(t)
-            if df is not None:
-                l = df.iloc[-1]
-                st.write(f"### {label} {t} (RSI: {r:.1f})")
-                st.write(f"🔴 BB+2σ: {l['BB_up_2']:,.0f} | 💰 現在値: {l['Close']:,.0f}")
-                st.write(f"🔵 MA60 : {l['MA60']:,.0f} | ⚪ MA200: {l['MA200']:,.0f} | 🟢 BB-3σ: {l['BB_low_3']:,.0f}")
-                if st.checkbox(f"監視に登録", value=True, key=f"sel_{t}"): final_list.append(t)
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.write("---")
-            
-        if st.button("選定銘柄を保存"):
-            with open(WATCHLIST_FILE, 'w') as f: json.dump(final_list, f)
-            st.success("保存完了。昼の監視タブを開いてください。")
+            with st.container():
+                st.markdown(f"<div style='background-color:{color}; padding:10px; border-radius:5px;'>", unsafe_allow_html=True)
+                st.write(f"**{t}** (RSI: {r:.1f})")
+                if st.checkbox(f"監視に登録", value=True, key=f"sel_{t}"):
+                    selected.append(t)
+                st.markdown("</div>", unsafe_allow_html=True)
+        
+        if st.button("この銘柄で監視を開始する"):
+            save_watchlist(selected)
+            st.success("保存しました！「昼の監視」タブでスタートしてください。")
 
 with tab2:
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, 'r') as f: watchlist = json.load(f)
-        st.write(f"📋 監視対象: {', '.join(watchlist)}")
-        
-        if st.button("監視スタート（9:20-15:20）"):
-            status_area = st.empty()
+    if not current_watchlist:
+        st.warning("監視銘柄が登録されていません。夜の選別タブで登録してください。")
+    else:
+        st.write(f"📋 現在の監視銘柄: {', '.join(current_watchlist)}")
+        if st.button("3分刻み監視スタート"):
+            placeholder = st.empty()
             while True:
-                if is_watch_time():
+                now = datetime.now().time()
+                if dt_time(9, 20) <= now <= dt_time(15, 20):
                     now_str = datetime.now().strftime('%H:%M:%S')
-                    status_area.info(f"監視実行中... 次のスキャンは3分後です ({now_str})")
-                    for t in watchlist:
+                    placeholder.info(f"監視中... 次のスキャンは3分後 ({now_str})")
+                    for t in current_watchlist:
                         df = get_stock_data(t)
                         if df is not None:
                             sigs = judge_jack_laws(df, t)
                             if sigs:
                                 requests.post(DISCORD_URL, json={"content": f"🔔 **{t}**\n{', '.join(sigs)}"})
-                                st.toast(f"{t} 検知")
+                                st.toast(f"{t} シグナル検知")
                     time.sleep(180)
                 else:
-                    status_area.warning("監視時間外です (09:20〜15:20)")
+                    placeholder.warning("現在、監視時間外です (09:20〜15:20)")
                     time.sleep(60)
