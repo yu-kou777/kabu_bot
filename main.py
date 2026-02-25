@@ -75,6 +75,7 @@ def judge_jack_laws(df, ticker):
         sigs.append("法則6:60MA突破(買)")
     return sigs
 
+# 状態初期化
 if 'current_watchlist' not in st.session_state: st.session_state['current_watchlist'] = load_watchlist()
 if 'monitoring' not in st.session_state: st.session_state['monitoring'] = False
 
@@ -94,38 +95,35 @@ with tab1:
             rsi_s = ta.rsi(df_d['Close'], length=14)
             if rsi_s is not None and not rsi_s.empty:
                 curr_rsi = rsi_s.iloc[-1]
-                if curr_rsi <= rsi_val: found.append({"ticker": t, "rsi": curr_rsi, "price": df_d['Close'].iloc[-1]})
+                if curr_rsi <= rsi_val: found.append({"ticker": t, "rsi": curr_rsi, "price": df_daily['Close'].iloc[-1] if 'df_daily' in locals() else 0})
         st.session_state.found = found
-    if col2.button("リセット"): 
-        save_watchlist([])
-        if 'found' in st.session_state: del st.session_state.found
-        st.rerun()
+    if col2.button("リセット"): save_watchlist([]); st.rerun()
 
     if 'found' in st.session_state:
-        st.success(f"{len(st.session_state.found)} 件ヒット")
         selected = []
         for item in st.session_state.found:
-            t, r, p = item['ticker'], item['rsi'], item['price']
-            # UI崩れ対策: Streamlit標準のinfoボックスを使用し、色付きカードを廃止
-            with st.container():
-                st.info(f"**{t} {JPX400_DICT.get(t)}**\n\n価格: {p:,.1f}円 | RSI: {r:.1f}")
-                if st.checkbox(f"監視に登録", value=True, key=f"sel_{t}"): selected.append(t)
-                st.write("---")
+            t, r = item['ticker'], item['rsi']
+            st.info(f"**{t} {JPX400_DICT.get(t)}** | RSI: {r:.1f}")
+            if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
         if st.button("選定銘柄を保存"): save_watchlist(selected); st.success("保存完了")
 
 with tab2:
     watch_list = st.session_state['current_watchlist']
-    if not watch_list: st.warning("監視銘柄がありません。")
+    if not watch_list: st.warning("銘柄がありません。")
     else:
         st.info(f"📋 監視対象: {', '.join([f'{t}({JPX400_DICT.get(t)})' for t in watch_list])}")
         c1, c2 = st.columns(2)
-        if c1.button("監視スタート"):
+        
+        # スタートボタン
+        if c1.button("▶️ 監視スタート", disabled=st.session_state.monitoring):
             st.session_state.monitoring = True
             send_discord("▶️ 友幸さんの株AI監視を開始しました。")
             st.rerun()
-        if c2.button("⚠️ 強制停止", type="primary"):
+            
+        # 強制停止ボタン
+        if c2.button("⚠️ 強制停止", type="primary", disabled=not st.session_state.monitoring):
             st.session_state.monitoring = False
-            send_discord("⏹️ 監視を強制停止しました。")
+            send_discord("⏹️ 友幸さんにより、監視が強制停止されました。")
             st.rerun()
 
         if st.session_state.monitoring:
@@ -142,17 +140,23 @@ with tab2:
                             if sigs:
                                 send_discord(f"🔔 **{t} {JPX400_DICT.get(t)}**\n{', '.join(sigs)}")
                                 st.toast(f"{t} 検知")
+                    # 3分間の待機（1秒ごとに停止・時間チェック）
                     for i in range(180, 0, -1):
+                        time.sleep(1)
+                        # 待機中に停止ボタンが押されたか、時間が過ぎたかをチェック
                         if not st.session_state.monitoring: break
+                        check_now = datetime.now().time()
+                        if not (dt_time(9, 20) <= check_now <= dt_time(15, 20)):
+                            break
                         placeholder.info(f"⏳ 次のスキャンまで残り {i} 秒...")
-                        time.sleep(1)
                 else:
-                    # 時間外停止の即時実行
+                    # 時間外の場合：10秒カウントダウンして強制終了
                     for i in range(10, 0, -1):
-                        placeholder.warning(f"🕒 監視時間外(0:00)です。{i}秒後に停止し、Discordに通知します。")
+                        placeholder.error(f"🕒 監視時間外です。{i}秒後に自動停止し通知します。")
                         time.sleep(1)
+                        if not st.session_state.monitoring: break # 途中で停止ボタンが押された場合
+                    
                     st.session_state.monitoring = False
                     send_discord("🕒 監視時間外のため、本日の監視を自動終了しました。明日09:20に自動再開予約済。")
                     st.rerun()
                     break
-
