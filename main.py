@@ -122,4 +122,3 @@ elif mode == "2.昼 of 昼の自動監視":
                 msg = f"🔔 **{t}**\nシグナル: {', '.join(signals)}"
                 requests.post(DISCORD_URL, json={"content": msg})
                 st.toast(msg)
-
