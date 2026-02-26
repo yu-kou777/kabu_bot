@@ -5,7 +5,7 @@ import pandas_ta as ta
 import requests
 import json
 import os
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 import time
 
 # --- 設定 ---
@@ -13,7 +13,12 @@ DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUu
 WATCHLIST_FILE = "jack_watchlist.json"
 JPX400_DICT = {'1605.T':'INPEX','1801.T':'大成建設','1802.T':'大林組','1925.T':'大和ハウス','2502.T':'アサヒ','2802.T':'味の素','2914.T':'JT','4063.T':'信越化学','4502.T':'武田薬品','4503.T':'アステラス','4519.T':'中外製薬','4568.T':'第一三共','4901.T':'富士フイルム','5401.T':'日本製鉄','5713.T':'住友鉱山','6301.T':'小松製作所','6367.T':'ダイキン','6501.T':'日立','6758.T':'ソニーG','6857.T':'アドバンテスト','6920.T':'レーザーテック','6954.T':'ファナック','6981.T':'村田製作所','7203.T':'トヨタ','7267.T':'ホンダ','7741.T':'HOYA','7974.T':'任天堂','8001.T':'伊藤忠','8031.T':'三井物産','8035.T':'東京エレクトロン','8058.T':'三菱商事','8306.T':'三菱UFJ','8316.T':'三井住友','8411.T':'みずほFG','8766.T':'東京海上','8801.T':'三井不動産','9020.T':'JR東日本','9101.T':'日本郵船','9104.T':'商船三井','9432.T':'NTT','9433.T':'KDDI','9983.T':'ファーストリテイリング','9984.T':'ソフトバンクG'}
 
-st.set_page_config(page_title="Jack株AI：お昼休み対応版", layout="centered")
+st.set_page_config(page_title="Jack株AI：日本時間・停止ボタン対応", layout="centered")
+
+# --- 日本時間(JST)を取得する関数 ---
+def get_jst_now():
+    # UTCから+9時間して日本時間を計算
+    return datetime.now(timezone(timedelta(hours=9)))
 
 def send_discord(message):
     try: requests.post(DISCORD_URL, json={"content": message}, timeout=10)
@@ -83,55 +88,51 @@ with tab1:
             if st.checkbox(f"{item['ticker']} {JPX400_DICT.get(item['ticker'])}", value=True, key=item['ticker']):
                 selected.append(item['ticker'])
         if st.button("選定銘柄を保存"):
-            data = [{"ticker": s_t, "added_date": datetime.now().strftime('%Y-%m-%d')} for s_t in selected]
+            data = [{"ticker": s_t, "added_date": get_jst_now().strftime('%Y-%m-%d')} for s_t in selected]
             with open(WATCHLIST_FILE, 'w') as f: json.dump(data, f)
             st.success("保存完了！")
 
 with tab2:
     watch_data = load_watchlist()
-    now = datetime.now().time()
-    today = datetime.now().strftime('%Y-%m-%d')
+    jst_now = get_jst_now()
+    now_time = jst_now.time()
     
-    # 監視時間・お昼休み判定
-    is_trading_time = dt_time(9, 20) <= now <= dt_time(15, 20)
-    is_lunch_break = dt_time(11, 50) <= now <= dt_time(12, 50)
+    # 強制停止ボタン
+    if st.button("🔴 監視を完全に停止する", type="primary"):
+        st.session_state.manual_stop = True
+        send_discord("🛑 【システム】友幸さんにより監視が強制停止されました。")
+        st.rerun()
 
-    if is_trading_time and not is_lunch_break:
-        # 監視再開（午後の部など）の通知
-        if st.session_state.get('current_mode') != 'running':
-            send_discord(f"▶️ 【システム】{datetime.now().strftime('%H:%M')} 監視を稼働します。")
-            st.session_state.current_mode = 'running'
+    # 監視再開ボタン
+    if st.session_state.get('manual_stop'):
+        st.warning("現在、監視を強制停止しています。")
+        if st.button("▶️ 監視を再開する"):
+            del st.session_state.manual_stop
+            send_discord("▶️ 【システム】監視を再開しました。")
+            st.rerun()
+    else:
+        # 監視時間・お昼休み判定 (日本時間基準)
+        is_trading_time = dt_time(9, 20) <= now_time <= dt_time(15, 20)
+        is_lunch_break = dt_time(11, 50) <= now_time <= dt_time(12, 50)
 
-        if not watch_data:
-            st.warning("監視銘柄がありません。")
-        else:
+        if is_trading_time and not is_lunch_break:
             status_p = st.empty()
+            status_p.success(f"🚀 日本時間で監視中... ({jst_now.strftime('%H:%M:%S')})")
+            
             for item in watch_data:
                 df = get_clean_df(item['ticker'])
                 if df is not None and len(df) >= 200:
                     sigs = check_laws(df, item['ticker'])
                     for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
             
+            # 1STエラー対策カウントダウン
             for i in range(180, 0, -1):
-                status_p.success(f"🚀 自動監視中... ({datetime.now().strftime('%H:%M:%S')}) \n\n ⏳ 次まで: {i}秒")
+                status_p.success(f"🚀 日本時間で監視中... ({get_jst_now().strftime('%H:%M:%S')}) \n\n ⏳ 次まで: {i}秒")
                 time.sleep(1)
             st.rerun()
-
-    elif is_lunch_break:
-        # お昼休みの通知（1回だけ）
-        if st.session_state.get('current_mode') != 'lunch':
-            send_discord("☕ 【システム】11:50 お昼休みのため監視を一時停止します。12:50に再開します。")
-            st.session_state.current_mode = 'lunch'
-        
-        st.info("☕ 現在はお昼休み（11:50～12:50）のため停止中です。")
-        time.sleep(60); st.rerun()
-
-    else:
-        # 取引時間外の通知
-        if st.session_state.get('current_mode') != 'off':
-            if now > dt_time(15, 20):
-                send_discord("⏹️ 【システム】15:20 本日の全監視を終了しました。")
-            st.session_state.current_mode = 'off'
-            
-        st.info("🕒 取引時間外です（09:20～15:20）。")
-        time.sleep(600); st.rerun()
+        elif is_lunch_break:
+            st.info("☕ お昼休み（11:50～12:50）のため停止中です。")
+            time.sleep(60); st.rerun()
+        else:
+            st.info(f"🕒 取引時間外です。現在は待機しています。 (日本時間: {jst_now.strftime('%H:%M:%S')})")
+            time.sleep(600); st.rerun()
