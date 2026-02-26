@@ -29,22 +29,15 @@ JPX400_DICT = {
 st.set_page_config(page_title="Jack株AI監視", layout="centered")
 
 def send_discord(message):
-    try: requests.post(DISCORD_URL, json={"content": message})
+    try: requests.post(DISCORD_URL, json={"content": message}, timeout=10)
     except: pass
 
 def get_business_days_diff(start_date_str):
-    start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-    today = datetime.now().date()
-    return len(pd.bdate_range(start=start_date, end=today))
-
-def save_watchlist(new_tickers):
-    existing_list = load_raw_watchlist()
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    for t in new_tickers:
-        if t not in [item['ticker'] for item in existing_list]:
-            existing_list.append({"ticker": t, "added_date": today_str})
-    with open(WATCHLIST_FILE, 'w') as f: json.dump(existing_list, f)
-    st.session_state['current_watchlist'] = existing_list
+    try:
+        start_date = pd.to_datetime(start_date_str)
+        today = pd.to_datetime(datetime.now().date())
+        return len(pd.bdate_range(start=start_date, end=today))
+    except: return 1
 
 def load_raw_watchlist():
     if os.path.exists(WATCHLIST_FILE):
@@ -53,14 +46,18 @@ def load_raw_watchlist():
         except: return []
     return []
 
+def save_watchlist_raw(data):
+    with open(WATCHLIST_FILE, 'w') as f: json.dump(data, f)
+
 def load_and_filter_watchlist():
     raw_list = load_raw_watchlist()
     filtered_list = []
     for item in raw_list:
+        # 営業日ベースで判定（当日を1日目として4営業日以内なら保持）
         if get_business_days_diff(item['added_date']) <= 4:
             filtered_list.append(item)
     if len(raw_list) != len(filtered_list):
-        with open(WATCHLIST_FILE, 'w') as f: json.dump(filtered_list, f)
+        save_watchlist_raw(filtered_list)
     return filtered_list
 
 def get_stock_data(ticker):
@@ -82,16 +79,13 @@ def judge_jack_laws(df, ticker):
     is_ha_green = last['HA_C'] > last['HA_O']
     is_macd_bullish = last['MACD'] > last['MACD_S']
     is_vol_spike = last['Volume'] > last['VOL_MA'] * 1.5
-    curr_rsi = last['RSI']
-    rsi_info = f"(RSI:{curr_rsi:.1f})"
+    rsi_info = f"(RSI:{last['RSI']:.1f})"
     
-    # 【新規】限界突破アラート (10以下 / 80以上)
-    if curr_rsi <= 10.0:
-        sigs.append(f"🚨【RSI限界突破】10以下! 極限の売られすぎ {rsi_info}")
-    elif curr_rsi >= 80.0:
-        sigs.append(f"🚨【RSI限界突破】80以上! 極限の買われすぎ {rsi_info}")
+    # RSI限界アラート
+    if last['RSI'] <= 10: sigs.append(f"🚨【RSI極限値】10以下です! {rsi_info}")
+    if last['RSI'] >= 80: sigs.append(f"🚨【RSI極限値】80以上です! {rsi_info}")
 
-    # 友幸さんの6つの法則
+    # 6つの法則
     if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
         sigs.append(f"法則1:強気限界(売) {rsi_info}")
     if last['Close'] > last['MA60']:
@@ -110,23 +104,24 @@ def judge_jack_laws(df, ticker):
         sigs.append(f"法則6:60MA突破(買) ★最強 {rsi_info}")
     return sigs
 
-# --- UI (スキャン/監視) ---
-st.title("📈 Jack株AI：最強版監視")
-
+# --- UI / 監視メイン ---
 if 'current_watchlist' not in st.session_state:
     st.session_state['current_watchlist'] = load_and_filter_watchlist()
+if 'monitoring' not in st.session_state:
+    st.session_state['monitoring'] = False
 
 tab1, tab2 = st.tabs(["🌙 4日間最低RSI選別", "☀️ 精密監視"])
 
 with tab1:
     st.subheader("直近4日間の最低RSIでスキャン")
     rsi_val = st.slider("抽出する最低RSIライン", 10, 60, 40)
-    col1, col2 = st.columns(2)
-    if col1.button("スキャン開始"):
+    c1, c2 = st.columns(2)
+    if c1.button("スキャン開始"):
         found = []; bar = st.progress(0)
-        all_data = yf.download(list(JPX400_DICT.keys()), period="40d", interval="1d", group_by='ticker', progress=False)
-        for i, t in enumerate(JPX400_DICT.keys()):
-            bar.progress((i + 1) / len(JPX400_DICT))
+        tickers = list(JPX400_DICT.keys())
+        all_data = yf.download(tickers, period="40d", interval="1d", group_by='ticker', progress=False)
+        for i, t in enumerate(tickers):
+            bar.progress((i + 1) / len(tickers))
             df_d = all_data[t].dropna()
             if len(df_d) < 18: continue
             rsi_s = ta.rsi(df_d['Close'], length=14)
@@ -135,43 +130,54 @@ with tab1:
                 if min_rsi_4d <= rsi_val:
                     found.append({"ticker": t, "min_rsi": min_rsi_4d, "cr": rsi_s.iloc[-1], "p": df_d['Close'].iloc[-1]})
         st.session_state.found = found
-    if col2.button("リセット"): 
-        if os.path.exists(WATCHLIST_FILE): os.remove(WATCHLIST_FILE)
-        st.session_state['current_watchlist'] = []; st.rerun()
+    
+    if c2.button("監視リストを強制リセット"):
+        save_watchlist_raw([]); st.session_state['current_watchlist'] = []; st.rerun()
 
     if 'found' in st.session_state:
         selected = []
         for item in st.session_state.found:
             t, mr, cr, p = item['ticker'], item['min_rsi'], item['cr'], item['p']
-            st.info(f"**{t} {JPX400_DICT.get(t)}** | 4日内最低: {mr:.1f} | 現在: {cr:.1f}")
+            st.write(f"**{t} {JPX400_DICT.get(t)}** | 4日内最低RSI: {mr:.1f} | 現在: {cr:.1f}")
             if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
-        if st.button("選定銘柄を保存"): save_watchlist(selected); st.success("保存完了。")
+        if st.button("選定銘柄を保存"):
+            existing = load_raw_watchlist()
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            for s_t in selected:
+                if s_t not in [x['ticker'] for x in existing]:
+                    existing.append({"ticker": s_t, "added_date": today_str})
+            save_watchlist_raw(existing); st.session_state['current_watchlist'] = existing; st.success("保存完了")
 
 with tab2:
     watch_data = st.session_state['current_watchlist']
-    if not watch_data: st.warning("監視銘柄がありません。")
+    if not watch_data:
+        st.warning("現在、監視銘柄はありません。")
     else:
-        st.write("📋 **監視中銘柄（4営業日保持）**")
+        st.write("📋 **現在の監視対象**")
         for item in watch_data:
-            st.write(f"・{item['ticker']} ({get_business_days_diff(item['added_date'])}営業日目)")
-        c1, c2 = st.columns(2)
-        if c1.button("▶️ 監視スタート"): st.session_state.monitoring = True; send_discord("▶️ 限界突破監視を開始。"); st.rerun()
-        if c2.button("⚠️ 強制停止", type="primary"): st.session_state.monitoring = False; send_discord("⏹️ 停止。"); st.rerun()
+            diff = get_business_days_diff(item['added_date'])
+            st.write(f"・{item['ticker']} ({JPX400_DICT.get(item['ticker'])}) - {diff}営業日目")
+        
+        col1, col2 = st.columns(2)
+        if col1.button("▶️ 監視スタート"):
+            st.session_state.monitoring = True; st.rerun()
+        if col2.button("⚠️ 強制停止", type="primary"):
+            st.session_state.monitoring = False; send_discord("⏹️ 友幸さんにより監視が停止されました。"); st.rerun()
 
         if st.session_state.monitoring:
-            p = st.empty()
+            placeholder = st.empty()
             while st.session_state.monitoring:
-                now = datetime.now()
-                if dt_time(9, 20) <= now.time() <= dt_time(15, 20):
-                    p.info(f"🚀 限界RSI/6つの法則 監視中... ({now.strftime('%H:%M:%S')})")
+                now_t = datetime.now().time()
+                if dt_time(9, 20) <= now_t <= dt_time(15, 20):
+                    placeholder.info(f"🚀 精密監視中... ({datetime.now().strftime('%H:%M:%S')})")
                     for item in watch_data:
-                        t = item['ticker']; df = get_stock_data(t)
+                        df = get_stock_data(item['ticker'])
                         if df is not None:
-                            sigs = judge_jack_laws(df, t)
-                            for s in sigs: send_discord(f"🔔 **{t} {JPX400_DICT.get(t)}**\n{s}")
+                            sigs = judge_jack_laws(df, item['ticker'])
+                            for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
                     for i in range(180, 0, -1):
                         if not st.session_state.monitoring: break
-                        p.info(f"⏳ 次の解析まで残り {i} 秒...")
+                        placeholder.info(f"⏳ 次の解析まで残り {i} 秒...")
                         time.sleep(1)
                 else:
-                    st.session_state.monitoring = False; send_discord("🕒 自動終了。"); st.rerun(); break
+                    st.session_state.monitoring = False; send_discord("🕒 時間外のため自動終了しました。"); st.rerun(); break
