@@ -5,7 +5,7 @@ import pandas_ta as ta
 import requests
 import json
 import os
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time
 import time
 
 # --- 設定 ---
@@ -20,18 +20,10 @@ def send_discord(message):
     try: requests.post(DISCORD_URL, json={"content": message}, timeout=10)
     except: pass
 
-def get_business_days_diff(start_date_str):
-    try:
-        start_date = pd.to_datetime(start_date_str).date()
-        return len(pd.bdate_range(start=start_date, end=datetime.now().date()))
-    except: return 1
-
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         try:
-            with open(WATCHLIST_FILE, 'r') as f:
-                data = json.load(f)
-                return [item for item in data if get_business_days_diff(item['added_date']) <= 4]
+            with open(WATCHLIST_FILE, 'r') as f: return json.load(f)
         except: return []
     return []
 
@@ -42,17 +34,17 @@ def save_watchlist(tickers):
         if t not in [x['ticker'] for x in existing]:
             existing.append({"ticker": t, "added_date": today_str})
     with open(WATCHLIST_FILE, 'w') as f: json.dump(existing, f)
-    st.session_state['current_watchlist'] = existing
 
-# --- 指標計算 (エラーガード強化) ---
-def get_clean_df(ticker, period="5d", interval="1m"):
+# --- 指標計算 (エラーガード) ---
+def get_clean_df(ticker):
     try:
-        raw = yf.download(ticker, period=period, interval=interval, progress=False)
+        raw = yf.download(ticker, period="5d", interval="1m", progress=False)
         if raw.empty: return None
         df = raw.copy()
-        # MultiIndex対策
+        # MultiIndexと型の不整合を解消
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        df = df.apply(pd.to_numeric, errors='coerce')
         return df
     except: return None
 
@@ -65,10 +57,8 @@ def check_laws(df, ticker):
         bb3 = ta.bbands(df['Close'], length=20, std=3)
         if bb is None or bb3 is None: return []
         
-        df['BB_up_2'] = bb['BBU_20_2.0']
-        df['BB_low_3'] = bb3['BBL_20_3.0']
-        macd = ta.macd(df['Close'])
-        df['MACD'] = macd['MACD_12_26_9']; df['MACD_S'] = macd['MACDs_12_26_9']
+        df['BB_up_2'] = bb['BBU_20_2.0']; df['BB_low_3'] = bb3['BBL_20_3.0']
+        macd = ta.macd(df['Close']); df['MACD'] = macd['MACD_12_26_9']; df['MACD_S'] = macd['MACDs_12_26_9']
         df['RSI'] = ta.rsi(df['Close'], length=14)
         ha = ta.ha(df['Open'], df['High'], df['Low'], df['Close'])
         df['HA_O'] = ha['HA_open']; df['HA_C'] = ha['HA_close']
@@ -77,12 +67,11 @@ def check_laws(df, ticker):
         is_down = last['MA200'] > last['MA60']
         rsi_txt = f"(RSI:{last['RSI']:.1f})"
 
-        # 法則判定
         if last['RSI'] <= 10 or last['RSI'] >= 80: sigs.append(f"🚨【RSI極限値】{rsi_txt}")
         if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
             sigs.append(f"法則1:強気限界(売) {rsi_txt}")
         if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
-            prefix = "⚠️【逆張り注意】" if is_down and last['HA_C'] <= last['HA_O'] else "🔥"
+            prefix = "⚠️【注意】" if is_down and last['HA_C'] <= last['HA_O'] else "🔥"
             sigs.append(f"{prefix}法則4:BB-3σ接触(買) {rsi_txt}")
         if last['Close'] < last['MA60'] and last['High'] >= last['MA60']:
             prefix = "💎【王道】" if is_down else ""
@@ -90,61 +79,57 @@ def check_laws(df, ticker):
         return sigs
     except: return []
 
-# --- UI (タブ構造の復活) ---
-tab1, tab2 = st.tabs(["🌙 夜の選別", "☀️ 精密監視"])
+# --- UI メイン ---
+tab1, tab2 = st.tabs(["🌙 夜の選別 (検索)", "☀️ 3分精密監視"])
 
 with tab1:
-    st.subheader("直近4日内最低RSI選別")
+    st.subheader("銘柄検索")
     rsi_val = st.slider("抽出ライン", 10, 60, 40)
     if st.button("全銘柄スキャン開始"):
         found = []; bar = st.progress(0)
-        tickers = list(JPX400_DICT.keys())
-        all_data = yf.download(tickers, period="40d", interval="1d", group_by='ticker', progress=False)
-        for i, t in enumerate(tickers):
-            bar.progress((i + 1) / len(tickers))
+        all_data = yf.download(list(JPX400_DICT.keys()), period="40d", interval="1d", group_by='ticker', progress=False)
+        for i, t in enumerate(JPX400_DICT.keys()):
+            bar.progress((i + 1) / len(JPX400_DICT))
             try:
                 df_d = all_data[t].dropna()
-                if len(df_d) < 18: continue
                 rsi_s = ta.rsi(df_d['Close'], length=14)
                 min_rsi = rsi_s.tail(4).min()
                 if min_rsi <= rsi_val:
-                    found.append({"ticker": t, "mr": min_rsi, "cr": rsi_s.iloc[-1]})
+                    found.append({"ticker": t, "mr": min_rsi})
             except: continue
         st.session_state.found = found
 
     if 'found' in st.session_state:
         selected = []
         for item in st.session_state.found:
-            t, mr, cr = item['ticker'], item['mr'], item['cr']
-            st.write(f"**{t} {JPX400_DICT.get(t)}** | 4日内最低RSI: {mr:.1f}")
-            if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
+            t = item['ticker']
+            if st.checkbox(f"{t} {JPX400_DICT.get(t)} (最低RSI:{item['mr']:.1f})", value=True, key=t):
+                selected.append(t)
         if st.button("選定銘柄を保存"):
-            save_watchlist(selected); st.success("監視リストに保存しました。")
+            save_watchlist(selected); st.success("保存完了！監視タブを確認してください。")
 
 with tab2:
     watch_data = load_watchlist()
     if not watch_data:
-        st.warning("監視銘柄がありません。夜の選別タブで追加してください。")
+        st.warning("監視銘柄がありません。")
     else:
         st.info(f"📋 監視対象: {len(watch_data)}銘柄")
-        if st.button("⚠️ リセット", type="primary"):
+        if st.button("⚠️ 全リセット", type="primary"):
             if os.path.exists(WATCHLIST_FILE): os.remove(WATCHLIST_FILE)
             st.rerun()
 
         now = datetime.now().time()
+        # 監視時間内なら1回実行して、3分後に再読み込み
         if dt_time(9, 20) <= now <= dt_time(15, 20):
-            placeholder = st.empty()
-            while True:
-                placeholder.info(f"🚀 精密監視中... ({datetime.now().strftime('%H:%M:%S')})")
-                for item in watch_data:
-                    df = get_clean_df(item['ticker'])
-                    if df is not None and len(df) >= 200:
-                        sigs = check_laws(df, item['ticker'])
-                        for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
-                time.sleep(180); st.rerun()
+            st.success(f"🚀 監視実行中... (最終スキャン: {datetime.now().strftime('%H:%M:%S')})")
+            for item in watch_data:
+                df = get_clean_df(item['ticker'])
+                if df is not None and len(df) >= 200:
+                    sigs = check_laws(df, item['ticker'])
+                    for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
+            
+            # 180秒待機して自動更新
+            time.sleep(180)
+            st.rerun()
         else:
-            st.warning("🕒 時間外です。9:20に自動再開します。")
-            # 時間外でもDiscord連携を確認したい場合、ここを通ると通知が飛びます
-            if 'last_off_msg' not in st.session_state:
-                send_discord("🕒 監視時間外のため待機中です。銘柄選別は「夜の選別」タブで行えます。")
-                st.session_state.last_off_msg = True
+            st.warning("🕒 監視時間外です（9:20〜15:20）。")
