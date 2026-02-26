@@ -13,7 +13,7 @@ DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUu
 WATCHLIST_FILE = "jack_watchlist.json"
 JPX400_DICT = {'1605.T':'INPEX','1801.T':'大成建設','1802.T':'大林組','1925.T':'大和ハウス','2502.T':'アサヒ','2802.T':'味の素','2914.T':'JT','4063.T':'信越化学','4502.T':'武田薬品','4503.T':'アステラス','4519.T':'中外製薬','4568.T':'第一三共','4901.T':'富士フイルム','5401.T':'日本製鉄','5713.T':'住友鉱山','6301.T':'小松製作所','6367.T':'ダイキン','6501.T':'日立','6758.T':'ソニーG','6857.T':'アドバンテスト','6920.T':'レーザーテック','6954.T':'ファナック','6981.T':'村田製作所','7203.T':'トヨタ','7267.T':'ホンダ','7741.T':'HOYA','7974.T':'任天堂','8001.T':'伊藤忠','8031.T':'三井物産','8035.T':'東京エレクトロン','8058.T':'三菱商事','8306.T':'三菱UFJ','8316.T':'三井住友','8411.T':'みずほFG','8766.T':'東京海上','8801.T':'三井不動産','9020.T':'JR東日本','9101.T':'日本郵船','9104.T':'商船三井','9432.T':'NTT','9433.T':'KDDI','9983.T':'ファーストリテイリング','9984.T':'ソフトバンクG'}
 
-st.set_page_config(page_title="Jack株AI：完全自動監視", layout="centered")
+st.set_page_config(page_title="Jack株AI：お昼休み対応版", layout="centered")
 
 def send_discord(message):
     try: requests.post(DISCORD_URL, json={"content": message}, timeout=10)
@@ -45,18 +45,17 @@ def check_laws(df, ticker):
         df['RSI'] = ta.rsi(df['Close'], length=14)
         ha = ta.ha(df['Open'], df['High'], df['Low'], df['Close'])
         df['HA_O'] = ha['HA_open']; df['HA_C'] = ha['HA_close']
-        last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
+        last = df.iloc[-1]; sigs = []
         is_down = last['MA200'] > last['MA60']
-        rsi_txt = f"(RSI:{last['RSI']:.1f})"
-        if last['RSI'] <= 10 or last['RSI'] >= 80: sigs.append(f"🚨【RSI極限値】{rsi_txt}")
+        if last['RSI'] <= 10 or last['RSI'] >= 80: sigs.append(f"🚨【RSI極限】(RSI:{last['RSI']:.1f})")
         if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
-            sigs.append(f"法則1:強気限界(売) {rsi_txt}")
+            sigs.append(f"法則1:強気限界(売) (RSI:{last['RSI']:.1f})")
         if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
             prefix = "⚠️【注意】" if is_down and last['HA_C'] <= last['HA_O'] else "🔥"
-            sigs.append(f"{prefix}法則4:BB-3σ接触(買) {rsi_txt}")
+            sigs.append(f"{prefix}法則4:BB-3σ接触(買) (RSI:{last['RSI']:.1f})")
         if last['Close'] < last['MA60'] and last['High'] >= last['MA60']:
             prefix = "💎【王道】" if is_down else ""
-            sigs.append(f"{prefix}法則6:60MA反発(売) {rsi_txt}")
+            sigs.append(f"{prefix}法則6:60MA反発(売) (RSI:{last['RSI']:.1f})")
         return sigs
     except: return []
 
@@ -78,48 +77,61 @@ with tab1:
                 if min_rsi <= rsi_val: found.append({"ticker": t, "mr": min_rsi})
             except: continue
         st.session_state.found = found
-
     if 'found' in st.session_state:
         selected = []
         for item in st.session_state.found:
-            t = item['ticker']
-            if st.checkbox(f"{t} {JPX400_DICT.get(t)} (最低RSI:{item['mr']:.1f})", value=True, key=t): selected.append(t)
+            if st.checkbox(f"{item['ticker']} {JPX400_DICT.get(item['ticker'])}", value=True, key=item['ticker']):
+                selected.append(item['ticker'])
         if st.button("選定銘柄を保存"):
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            data = [{"ticker": s_t, "added_date": today_str} for s_t in selected]
+            data = [{"ticker": s_t, "added_date": datetime.now().strftime('%Y-%m-%d')} for s_t in selected]
             with open(WATCHLIST_FILE, 'w') as f: json.dump(data, f)
-            st.success("保存完了！監視時間に自動で開始します。")
+            st.success("保存完了！")
 
 with tab2:
     watch_data = load_watchlist()
     now = datetime.now().time()
+    today = datetime.now().strftime('%Y-%m-%d')
     
-    # 【自動開始・終了ロジック】
-    if dt_time(9, 20) <= now <= dt_time(15, 20):
+    # 監視時間・お昼休み判定
+    is_trading_time = dt_time(9, 20) <= now <= dt_time(15, 20)
+    is_lunch_break = dt_time(11, 50) <= now <= dt_time(12, 50)
+
+    if is_trading_time and not is_lunch_break:
+        # 監視再開（午後の部など）の通知
+        if st.session_state.get('current_mode') != 'running':
+            send_discord(f"▶️ 【システム】{datetime.now().strftime('%H:%M')} 監視を稼働します。")
+            st.session_state.current_mode = 'running'
+
         if not watch_data:
-            st.warning("監視銘柄がありません。夜の選別タブで追加してください。")
+            st.warning("監視銘柄がありません。")
         else:
-            st.success(f"🚀 自動監視実行中... (現在: {datetime.now().strftime('%H:%M:%S')})")
-            st.write(f"📋 対象: {len(watch_data)}銘柄")
-            
-            # 初回実行時のみ通知
-            if 'first_run' not in st.session_state:
-                send_discord("▶️ 監視時間（09:20）になりました。自動監視を開始します。")
-                st.session_state.first_run = True
-                
+            status_p = st.empty()
             for item in watch_data:
                 df = get_clean_df(item['ticker'])
                 if df is not None and len(df) >= 200:
                     sigs = check_laws(df, item['ticker'])
                     for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
             
-            # 3分待機して自動リフレッシュ
-            time.sleep(180); st.rerun()
-    else:
-        st.info("🕒 現在は監視予約時間外です（09:20 〜 15:20）。")
-        st.write("このまま画面を開いておけば、明日の朝 09:20 に自動で監視が始まります。")
+            for i in range(180, 0, -1):
+                status_p.success(f"🚀 自動監視中... ({datetime.now().strftime('%H:%M:%S')}) \n\n ⏳ 次まで: {i}秒")
+                time.sleep(1)
+            st.rerun()
+
+    elif is_lunch_break:
+        # お昼休みの通知（1回だけ）
+        if st.session_state.get('current_mode') != 'lunch':
+            send_discord("☕ 【システム】11:50 お昼休みのため監視を一時停止します。12:50に再開します。")
+            st.session_state.current_mode = 'lunch'
         
-        # 終了時間直後の処理
-        if now > dt_time(15, 20) and 'first_run' in st.session_state:
-            send_discord("⏹️ 監視時間（15:20）を過ぎたため、本日の自動監視を終了しました。")
-            del st.session_state.first_run
+        st.info("☕ 現在はお昼休み（11:50～12:50）のため停止中です。")
+        time.sleep(60); st.rerun()
+
+    else:
+        # 取引時間外の通知
+        if st.session_state.get('current_mode') != 'off':
+            if now > dt_time(15, 20):
+                send_discord("⏹️ 【システム】15:20 本日の全監視を終了しました。")
+            st.session_state.current_mode = 'off'
+            
+        st.info("🕒 取引時間外です（09:20～15:20）。")
+        time.sleep(600); st.rerun()
