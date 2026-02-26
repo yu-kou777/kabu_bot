@@ -5,7 +5,7 @@ import pandas_ta as ta
 import requests
 import json
 import os
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 import time
 
 # --- 設定 ---
@@ -20,30 +20,39 @@ def send_discord(message):
     try: requests.post(DISCORD_URL, json={"content": message}, timeout=10)
     except: pass
 
+def get_business_days_diff(start_date_str):
+    try:
+        start_date = pd.to_datetime(start_date_str).date()
+        today = datetime.now().date()
+        return len(pd.bdate_range(start=start_date, end=today))
+    except: return 1
+
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, 'r') as f: return json.load(f)
+        try:
+            with open(WATCHLIST_FILE, 'r') as f:
+                data = json.load(f)
+                today = datetime.now().date()
+                # 4営業日以内のものだけ保持
+                return [item for item in data if get_business_days_diff(item['added_date']) <= 4]
+        except: return []
     return []
 
-# --- 友幸さんの法則を完全自動化した監視エンジン ---
-def monitor_engine():
-    watch_data = load_watchlist()
-    if not watch_data: return
-    
-    # 営業日ベースのフィルタリング
-    today = datetime.now().date()
-    valid_list = []
-    for item in watch_data:
-        added = datetime.strptime(item['added_date'], '%Y-%m-%d').date()
-        if len(pd.bdate_range(start=added, end=today)) <= 4:
-            valid_list.append(item)
-    
-    for item in valid_list:
-        t = item['ticker']
-        df = yf.download(t, period="5d", interval="1m", progress=False)
-        if df.empty or len(df) < 60: continue
-        
-        # 指標計算
+def save_watchlist(tickers):
+    existing = load_watchlist()
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    for t in tickers:
+        if t not in [x['ticker'] for x in existing]:
+            existing.append({"ticker": t, "added_date": today_str})
+    with open(WATCHLIST_FILE, 'w') as f:
+        json.dump(existing, f)
+    st.session_state['current_watchlist'] = existing
+
+# --- 指標・判定ロジック ---
+def get_analysis(ticker):
+    try:
+        df = yf.download(ticker, period="5d", interval="1m", progress=False)
+        if df.empty or len(df) < 60: return None
         df['MA60'] = ta.sma(df['Close'], length=60)
         df['MA200'] = ta.sma(df['Close'], length=200)
         bb = ta.bbands(df['Close'], length=20, std=2)
@@ -51,38 +60,87 @@ def monitor_engine():
         bb3 = ta.bbands(df['Close'], length=20, std=3)
         df['BB_low_3'] = bb3['BBL_20_3.0']
         macd = ta.macd(df['Close'])
-        df['MACD'] = macd['MACD_12_26_9']
-        df['MACD_S'] = macd['MACDs_12_26_9']
-        df['VOL_MA'] = ta.sma(df['Volume'], length=20)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['MACD'] = macd['MACD_12_26_9']; df['MACD_S'] = macd['MACDs_12_26_9']
+        df['VOL_MA'] = ta.sma(df['Volume'], length=20); df['RSI'] = ta.rsi(df['Close'], length=14)
         ha = ta.ha(df['Open'], df['High'], df['Low'], df['Close'])
         df['HA_O'] = ha['HA_open']; df['HA_C'] = ha['HA_close']
-        
-        # 判定
-        last = df.iloc[-1]; prev = df.iloc[-2]
-        is_ha_green = last['HA_C'] > last['HA_O']
-        is_macd_bullish = last['MACD'] > last['MACD_S']
-        is_vol_spike = last['Volume'] > last['VOL_MA'] * 1.5
-        rsi_txt = f"(RSI:{last['RSI']:.1f})"
-        
-        # 通知ロジック
-        msg = []
-        if last['RSI'] <= 10 or last['RSI'] >= 80: msg.append(f"🚨【RSI極限値】{rsi_txt}")
-        if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3: msg.append(f"法則1:強気限界(売) {rsi_txt}")
-        if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']: msg.append(f"法則4:BB-3σ反発(買) {'🔥大商い' if is_vol_spike else ''} {rsi_txt}")
-        if last['Close'] > last['MA60'] and prev['Close'] < prev['MA60'] and is_ha_green and is_macd_bullish: msg.append(f"法則6:60MA突破(買) ★最強 {rsi_txt}")
-        
-        for m in msg: send_discord(f"🔔 **{t} {JPX400_DICT.get(t)}**\n{m}")
+        return df
+    except: return None
 
-# --- メイン実行部 ---
-now = datetime.now().time()
-if dt_time(9, 20) <= now <= dt_time(15, 20):
-    st.info("🚀 監視稼働中...")
-    monitor_engine()
-    time.sleep(180)
-    st.rerun()
-else:
-    st.warning("🕒 時間外です。10秒後に停止します。")
-    time.sleep(10)
-    send_discord("🕒 本日の監視を終了しました。明日09:20に再開します。")
-    st.stop()
+def check_laws(df, ticker):
+    last = df.iloc[-1]; prev = df.iloc[-2]; sigs = []
+    is_ha_green = last['HA_C'] > last['HA_O']
+    is_macd_bullish = last['MACD'] > last['MACD_S']
+    is_vol_spike = last['Volume'] > last['VOL_MA'] * 1.5
+    rsi_txt = f"(RSI:{last['RSI']:.1f})"
+    
+    if last['RSI'] <= 10 or last['RSI'] >= 80: sigs.append(f"🚨【RSI極限値】{rsi_txt}")
+    if last['Close'] > last['MA60'] and (df['High'].tail(10) >= df['BB_up_2'].tail(10)).sum() >= 3:
+        sigs.append(f"法則1:強気限界(売) {rsi_txt}")
+    if last['Close'] < last['MA60'] and last['Low'] <= last['BB_low_3']:
+        sigs.append(f"法則4:BB-3σ反発(買) {'🔥大商い' if is_vol_spike else ''} {rsi_txt}")
+    if last['Close'] > last['MA60'] and prev['Close'] < prev['MA60'] and is_ha_green and is_macd_bullish:
+        sigs.append(f"法則6:60MA突破(買) ★最強 {rsi_txt}")
+    return sigs
+
+# --- UI ---
+st.title("📈 Jack株AI：選別と精密監視")
+
+if 'current_watchlist' not in st.session_state:
+    st.session_state['current_watchlist'] = load_watchlist()
+
+tab1, tab2 = st.tabs(["🌙 銘柄選別", "☀️ 精密監視"])
+
+with tab1:
+    st.subheader("直近4日内最低RSIスキャン")
+    rsi_val = st.slider("抽出ライン", 10, 60, 40)
+    if st.button("全銘柄スキャン開始"):
+        found = []; bar = st.progress(0)
+        all_data = yf.download(list(JPX400_DICT.keys()), period="40d", interval="1d", group_by='ticker', progress=False)
+        for i, t in enumerate(JPX400_DICT.keys()):
+            bar.progress((i + 1) / len(JPX400_DICT))
+            df_d = all_data[t].dropna()
+            if len(df_d) < 18: continue
+            rsi_s = ta.rsi(df_d['Close'], length=14)
+            if rsi_s is not None and not rsi_s.empty:
+                min_rsi = rsi_s.tail(4).min()
+                if min_rsi <= rsi_val:
+                    found.append({"ticker": t, "min_rsi": min_rsi, "cr": rsi_s.iloc[-1]})
+        st.session_state.found = found
+
+    if 'found' in st.session_state:
+        selected = []
+        for item in st.session_state.found:
+            t, mr, cr = item['ticker'], item['min_rsi'], item['cr']
+            st.write(f"**{t} {JPX400_DICT.get(t)}** | 4日内最低RSI: {mr:.1f} | 現在: {cr:.1f}")
+            if st.checkbox(f"登録", value=True, key=f"sel_{t}"): selected.append(t)
+        if st.button("選定銘柄を保存"):
+            save_watchlist(selected); st.success("監視リストに追加しました！")
+
+with tab2:
+    watch_data = st.session_state['current_watchlist']
+    if not watch_data:
+        st.warning("監視銘柄がありません。")
+    else:
+        st.write("📋 **現在の監視対象**")
+        for item in watch_data:
+            diff = get_business_days_diff(item['added_date'])
+            st.write(f"・{item['ticker']} ({JPX400_DICT.get(item['ticker'])}) - {diff}営業日目")
+        
+        if st.button("⚠️ リセット", type="primary"):
+            if os.path.exists(WATCHLIST_FILE): os.remove(WATCHLIST_FILE)
+            st.session_state['current_watchlist'] = []; st.rerun()
+
+        now = datetime.now().time()
+        if dt_time(9, 20) <= now <= dt_time(15, 20):
+            placeholder = st.empty()
+            while True:
+                placeholder.info(f"🚀 精密監視中... ({datetime.now().strftime('%H:%M:%S')})")
+                for item in watch_data:
+                    df = get_analysis(item['ticker'])
+                    if df is not None:
+                        sigs = check_laws(df, item['ticker'])
+                        for s in sigs: send_discord(f"🔔 **{item['ticker']} {JPX400_DICT.get(item['ticker'])}**\n{s}")
+                time.sleep(180); st.rerun()
+        else:
+            st.warning("🕒 現在は監視時間外です（9:20〜15:20）。")
