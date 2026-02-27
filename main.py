@@ -12,29 +12,30 @@ JPX400_DICT = {'1605.T':'INPEX','1801.T':'大成建設','1802.T':'大林組','19
 
 st.set_page_config(page_title="Jack株AI：5日RSIスキャナー", layout="wide")
 
-# セッション状態（メモリ）の初期化
+# メモリ（セッション）の初期化
 if 'hits_5d' not in st.session_state: st.session_state.hits_5d = []
 if 'reasons' not in st.session_state: st.session_state.reasons = {}
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
-# 自前計算RSI（安定性重視）
+# 堅牢なRSI計算
 def calculate_rsi(series):
+    if len(series) < 15: return pd.Series([np.nan] * len(series))
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    return 100 - (100 / (1 + (gain / loss)))
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 def save_list(selected_full_names):
     data = []
     for full in selected_full_names:
         code = full.split(" ")[0]
-        reason = st.session_state.reasons.get(code, "手動登録")
         data.append({
             "ticker": code,
             "name": JPX400_DICT.get(code, ""),
-            "reason": reason,
+            "reason": st.session_state.reasons.get(code, "手動登録"),
             "at": get_jst_now().strftime('%m/%d %H:%M')
         })
     with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
@@ -47,42 +48,51 @@ options = [f"{k} {v}" for k, v in JPX400_DICT.items()]
 
 with tab1:
     st.header("🌙 直近5日間のRSI低迷を探す")
-    st.write("過去5日間の日足で、一度でもしきい値を下回った銘柄を抽出します。")
-    thr = st.slider("RSIしきい値", 10, 85, 60, key="slider1")
+    thr = st.slider("RSIしきい値", 10, 85, 70, key="slider1")
     
     if st.button("🚀 スキャン開始", key="btn1"):
-        st.session_state.hits_5d = [] # リセット
-        bar = st.progress(0); status = st.empty()
-        tickers = list(JPX400_DICT.items())
+        st.session_state.hits_5d = []
+        bar = st.progress(0)
+        status = st.empty()
+        log_area = st.expander("詳細ログ（スキャン中の動き）", expanded=True)
         
+        tickers = list(JPX400_DICT.items())
         for i, (t, n) in enumerate(tickers):
             bar.progress((i+1)/len(tickers))
             status.text(f"分析中: {t} {n}")
             try:
-                # 1銘柄ずつ確実に取得
-                df = yf.download(t, period="3mo", progress=False)
-                if df.empty: continue
+                # 取得
+                df = yf.download(t, period="3mo", interval="1d", progress=False)
+                if df.empty:
+                    log_area.write(f"⚠️ {t}: データ取得失敗")
+                    continue
                 
-                # データの抽出（MultiIndex対策）
-                close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-                rsi_s = calculate_rsi(close.dropna())
-                min_val = rsi_s.tail(5).min()
+                # Close列の抽出
+                close = df['Close']
+                if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
+                close = close.dropna()
+                
+                rsi_s = calculate_rsi(close)
+                # 直近5日間(実営業日)の最小値
+                recent_rsi = rsi_s.tail(5)
+                min_val = recent_rsi.min()
                 
                 if min_val <= thr:
                     name_full = f"{t} {n}"
                     st.session_state.hits_5d.append(name_full)
                     st.session_state.reasons[t] = f"5日RSI低迷({min_val:.1f})"
-            except: continue
+                    log_area.write(f"✅ {t}: ヒット！ (最小RSI: {min_val:.1f})")
+                else:
+                    log_area.write(f"⚪ {t}: 条件外 (最小RSI: {min_val:.1f})")
+            except Exception as e:
+                log_area.write(f"❌ {t}: エラー発生 ({str(e)})")
+                continue
             
         status.empty(); bar.empty()
-        if st.session_state.hits_5d:
-            st.success(f"{len(st.session_state.hits_5d)}銘柄を検知しました。")
-        else:
-            st.warning("条件に合う銘柄は見つかりませんでした。しきい値を上げてください。")
+        st.success(f"スキャン完了：{len(st.session_state.hits_5d)}銘柄検知")
         st.rerun()
     
-    # スキャン結果を自動で入力枠に入れる
-    sel1 = st.multiselect("監視に追加（ここに入った銘柄を保存します）", options, default=st.session_state.hits_5d, key="ms1")
+    sel1 = st.multiselect("監視に追加（ここに入った銘柄を保存）", options, default=st.session_state.hits_5d, key="ms1")
     if st.button("💾 この内容を保存して開始", key="sv1"):
         save_list(sel1)
 
