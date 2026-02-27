@@ -13,14 +13,14 @@ JPX400_DICT = {'1605.T':'INPEX','1801.T':'大成建設','1802.T':'大林組','19
 
 st.set_page_config(page_title="Jack株AI：完全版", layout="wide")
 
-# セッション状態の初期化
-if 'temp_hits' not in st.session_state: st.session_state.temp_hits = []
+# セッション状態（記憶）の初期化
+if 'hits1' not in st.session_state: st.session_state.hits1 = []
+if 'hits2' not in st.session_state: st.session_state.hits2 = []
 if 'reasons' not in st.session_state: st.session_state.reasons = {}
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
-# 指標計算（ライブラリ不使用）
 def calculate_rsi(series):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -34,30 +34,30 @@ def calculate_rci(series, period=9):
         return (1 - 6 * d / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
-def save_watchlist(selected_codes):
-    final_data = []
-    for code in selected_codes:
+def save_list(selected_full_names):
+    data = []
+    for full in selected_full_names:
+        code = full.split(" ")[0]
         reason = st.session_state.reasons.get(code, "手動登録")
-        final_data.append({
+        data.append({
             "ticker": code,
             "name": JPX400_DICT.get(code, ""),
             "reason": reason,
             "at": get_jst_now().strftime('%m/%d %H:%M')
         })
     with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
-        json.dump(final_data, f, ensure_ascii=False, indent=2)
-    st.success(f"✅ {len(final_data)} 銘柄を正常に保存しました！")
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    st.success(f"✅ {len(data)} 銘柄を保存しました！")
 
 # --- UI ---
 tab1, tab2, tab3 = st.tabs(["🌙 5日RSI検索", "📊 RCI複合分析", "☀️ 監視リスト管理"])
-
-options_map = {f"{k} {v}": k for k, v in JPX400_DICT.items()}
+options = [f"{k} {v}" for k, v in JPX400_DICT.items()]
 
 with tab1:
     st.header("🌙 直近5日間のRSIで探す")
-    thr = st.slider("RSIしきい値", 10, 80, 50)
-    if st.button("🚀 RSIスキャン開始"):
-        st.session_state.temp_hits = []
+    thr = st.slider("しきい値", 10, 80, 50, key="slider1")
+    if st.button("🚀 RSIスキャン開始", key="btn1"):
+        st.session_state.hits1 = []
         bar = st.progress(0); tickers = list(JPX400_DICT.keys())
         for i, t in enumerate(tickers):
             bar.progress((i+1)/len(tickers))
@@ -66,18 +66,21 @@ with tab1:
                 rsi_s = calculate_rsi(df)
                 m = rsi_s.tail(5).min()
                 if m <= thr:
-                    st.session_state.temp_hits.append(f"{t} {JPX400_DICT[t]}")
+                    name_full = f"{t} {JPX400_DICT[t]}"
+                    st.session_state.hits1.append(name_full)
                     st.session_state.reasons[t] = f"5日RSI低迷({m:.1f})"
             except: continue
+        st.rerun() # 画面を更新して選択肢に反映
     
-    selected1 = st.multiselect("監視リストに追加", list(options_map.keys()), default=st.session_state.temp_hits)
-    if st.button("💾 この内容を保存（タブ1）"):
-        save_watchlist([options_map[s] for s in selected1])
+    # key="m1" を指定して重複回避
+    sel1 = st.multiselect("監視リストに追加（検索結果が自動入力されます）", options, default=st.session_state.hits1, key="m1")
+    if st.button("💾 この内容を保存（タブ1）", key="save1"):
+        save_list(sel1)
 
 with tab2:
     st.header("📊 RCI × RSI 複合分析")
-    if st.button("🔍 複合スキャン実行"):
-        st.session_state.temp_hits2 = []
+    if st.button("🔍 複合スキャン実行", key="btn2"):
+        st.session_state.hits2 = []
         bar2 = st.progress(0); tickers = list(JPX400_DICT.keys())
         for i, t in enumerate(tickers):
             bar2.progress((i+1)/len(tickers))
@@ -86,20 +89,22 @@ with tab2:
                 rsi = calculate_rsi(df).iloc[-1]
                 rci = calculate_rci(df).iloc[-1]
                 if (rsi <= 35 and rci <= -80) or (rsi >= 70 and rci >= 80):
-                    st.session_state.temp_hits2.append(f"{t} {JPX400_DICT[t]}")
-                    st.session_state.reasons[t] = f"複合判定(RSI:{rsi:.1f},RCI:{rci:.1f})"
+                    name_full = f"{t} {JPX400_DICT[t]}"
+                    st.session_state.hits2.append(name_full)
+                    st.session_state.reasons[t] = f"複合判定(RSI:{rsi:.1f}, RCI:{rci:.1f})"
             except: continue
+        st.rerun()
     
-    selected2 = st.multiselect("監視リストに追加", list(options_map.keys()), default=st.session_state.get('temp_hits2', []))
-    if st.button("💾 この内容を保存（タブ2）"):
-        save_watchlist([options_map[s] for s in selected2])
+    # key="m2" を指定して重複回避
+    sel2 = st.multiselect("監視リストに追加（検索結果が自動入力されます）", options, default=st.session_state.hits2, key="m2")
+    if st.button("💾 この内容を保存（タブ2）", key="save2"):
+        save_list(sel2)
 
 with tab3:
     st.header("☀️ 現在の監視リスト")
-    if st.button("🗑️ 全削除", type="primary"):
-        save_watchlist([]); st.rerun()
+    if st.button("🗑️ 全銘柄を削除", type="primary", key="clear_all"):
+        save_list([]); st.rerun()
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
             for item in json.load(f):
                 st.write(f"🔹 **{item['ticker']} {item.get('name')}** ({item.get('reason')})")
-
