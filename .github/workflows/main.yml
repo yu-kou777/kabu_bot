@@ -1,27 +1,19 @@
-name: Stock Monitor 3min Logic
-
+name: Stock Monitor Background
 on:
   schedule:
-    # 5分おきに実行 (GitHub Actions無料枠の限界頻度)
-    # 日本時間 09:00 - 11:15 (UTC 00:00 - 02:15)
-    - cron: '*/5 0-2 * * 1-5'
-    # 日本時間 12:30 - 14:55 (UTC 03:30 - 05:55)
-    - cron: '*/5 3-5 * * 1-5'
-  workflow_dispatch:
+    - cron: '*/5 0-7 * * 1-5'  # 平日の日本時間9時〜16時に5分おきに実行
+  workflow_dispatch:           # 手動開始ボタン
 
 jobs:
-  run-script:
+  run-monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
         with:
           python-version: '3.9'
-      - name: Install Libs
-        run: pip install yfinance pandas requests
-      - name: Run Bot
-        env:
-          TZ: 'Asia/Tokyo'
-        run: python main.py
+      - name: Install dependencies
+        run: pip install yfinance pandas pandas-ta requests
+      - name: Run Scan
+        run: python monitor.py
