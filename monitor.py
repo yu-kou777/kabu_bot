@@ -29,68 +29,73 @@ def calculate_rci(series, period):
 def morning_strategy_report():
     if not os.path.exists(WATCHLIST_FILE): return
     with open(WATCHLIST_FILE, 'r') as f: watchlist = json.load(f)
-    tickers = [item['ticker'] for item in watchlist]
+    if not watchlist: return
     
-    send_discord("🌅 **【09:15 Jack株AI 朝刊レポート】**\n本日の監視銘柄の寄り付き前状況を確認します。")
+    tickers = [item['ticker'] for item in watchlist]
+    send_discord("🌅 **【Jack株AI 朝刊レポート】**\n本日の監視対象の寄り付き前状況です。")
     all_d = yf.download(tickers, period="5d", interval="1d", progress=False)
     
     report = []
-    for t in tickers:
+    for item in watchlist:
+        t = item['ticker']
+        reason = item.get('reason', '手動追加')
         try:
             df = all_d[t].dropna()
             r9 = calculate_rci(df['Close'], 9).iloc[-1]
-            # RSI計算
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
-            report.append(f"・**{t}**: RCI(9)={r9:.1f} / RSI={rsi:.1f}")
+            report.append(f"・{t} ({reason}): RCI(9)={r9:.1f}")
         except: continue
-    
-    if report: send_discord("\n".join(report) + "\n\n🚀 09:20より精密監視をスタートします！")
+    if report: send_discord("\n".join(report) + "\n\n🚀 09:20より精密監視を開始します！")
 
-# --- 🕒 15:00 大引け速報（全銘柄スキャン） ---
+# --- 🕒 15:00 大引け速報 ---
 def afternoon_daily_scan():
-    send_discord("🕒 **15:00 大引け速報：JPX400全銘柄の日足複合分析を実行...**")
+    send_discord("🕒 **15:00 大引け速報：全銘柄の日足分析を実行中...**")
     all_d = yf.download(JPX400_LIST, period="100d", interval="1d", group_by='ticker', progress=False)
     hits = []
     for t in JPX400_LIST:
         try:
             df = all_d[t].dropna()
             r9 = calculate_rci(df['Close'], 9)
-            if (r9.iloc[-1] > r9.iloc[-2] and r9.iloc[-2] < -80): hits.append(f"🚀 **{t}**: 買い転換サイン")
-            elif (r9.iloc[-1] < r9.iloc[-2] and r9.iloc[-2] > 80): hits.append(f"📉 **{t}**: 売り転換サイン")
+            if r9.iloc[-1] > r9.iloc[-2] and r9.iloc[-2] < -80: hits.append(f"🚀 **{t}**: 買い転換サイン")
+            elif r9.iloc[-1] < r9.iloc[-2] and r9.iloc[-2] > 80: hits.append(f"📉 **{t}**: 売り転換サイン")
         except: continue
-    if hits: send_discord("📢 **明日のための注目銘柄：**\n" + "\n".join(hits))
-    else: send_discord("✅ 本日は目立った転換銘柄はありませんでした。")
+    if hits: send_discord("📢 **明日のための仕込み候補：**\n" + "\n".join(hits))
+    else: send_discord("✅ 本日は転換銘柄なし。")
 
-# --- ☀️ 精密監視（法則判定） ---
-def check_1m_logic(ticker):
+# --- ☀️ 精密監視（タイムラグ予測含む） ---
+def check_1m_logic(item):
+    ticker = item['ticker']
+    reason = item.get('reason', '監視銘柄') # 理由を取得
     try:
         df = yf.download(ticker, period="2d", interval="1m", progress=False)
         if len(df) < 100: return
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
         df['MA60'] = df['Close'].rolling(60).mean()
         df['MA200'] = df['Close'].rolling(200).mean()
-        # 20分タイムラグ確定
+        
+        # ✅ 20分タイムラグ確定ロジック（今後の継続を予測）
         is_strong = (df['MA60'].diff(20).iloc[-1] * df['MA200'].diff(20).iloc[-1] > 0)
         
+        ma20 = df['Close'].rolling(20).mean()
+        std20 = df['Close'].rolling(20).std()
+        bb_l3 = ma20 - (std20 * 3)
+        
         last = df.iloc[-1]; sigs = []
-        if last['Low'] <= (df['Close'].rolling(20).mean() - (df['Close'].rolling(20).std() * 3)).iloc[-1]: sigs.append("🔥法則4:BB-3σ接触(買)")
+        if last['Low'] <= bb_l3.iloc[-1]: sigs.append("🔥法則4:BB-3σ接触(買)")
         
         for s in sigs:
             label = "💎【超王道・20分確定】" if is_strong else "🔔"
-            send_discord(f"{label} **{ticker}**\n{s}")
+            send_discord(f"{label} **【{reason}】{ticker}**\n{s}") # 理由も通知に含める
     except: pass
 
 if __name__ == "__main__":
     jst_now = get_jst_now()
     now = jst_now.time()
     
-    # 時間帯ごとの処理
     if dt_time(9, 15) <= now <= dt_time(9, 18): morning_strategy_report()
     elif dt_time(15, 0) <= now <= dt_time(15, 5): afternoon_daily_scan()
     elif (dt_time(9,20) <= now <= dt_time(11,50)) or (dt_time(12,50) <= now <= dt_time(15,20)):
         if os.path.exists(WATCHLIST_FILE):
             with open(WATCHLIST_FILE, 'r') as f:
-                for item in json.load(f): check_1m_logic(item['ticker'])
+                watchlist = json.load(f)
+                for item in watchlist: check_1m_logic(item)
