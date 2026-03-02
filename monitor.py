@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- ⚙️ 設定エリア ---
 # DiscordのWebhook URLをここに貼り付けてください
-DISCORD_WEBHOOK_URL = "ここにURLを貼り付け"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 
 def get_jst_now():
