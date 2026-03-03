@@ -2,7 +2,7 @@ name: Stock Monitor Loop
 
 on:
   schedule:
-    - cron: '*/5 0-6 * * 1-5' # 平日JST 9:00-15:00に5分おき
+    - cron: '*/5 0-6 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.9'
       - name: Install dependencies
-        run: pip install yfinance==0.2.54 pandas requests numpy
+        run: pip install yfinance==0.2.54 pandas requests numpy xlrd
       - name: Run Monitor
         run: python monitor.py
       - name: Commit and Push
