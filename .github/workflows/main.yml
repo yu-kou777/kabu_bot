@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # 👈 書き込み許可
     steps:
       - uses: actions/checkout@v3
       - name: Set up Python
@@ -17,14 +17,15 @@ jobs:
         with:
           python-version: '3.9'
       - name: Install dependencies
-        run: pip install yfinance pandas requests numpy
+        run: pip install yfinance>=0.2.40 pandas requests numpy # 👈 yfinanceのバージョンを指定
       - name: Run Monitor
         run: python monitor.py
       - name: Commit and Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # ファイルが存在する場合のみ追加（エラー防止）
-          git add pre_scan_results.json jack_watchlist.json || true
-          git commit -m "Auto-update" || exit 0
+          # ✅ 修正：個別にaddして、失敗しても次に進むように変更
+          git add pre_scan_results.json || echo "pre_scan_results.json not found"
+          git add jack_watchlist.json || echo "jack_watchlist.json not found"
+          git commit -m "Auto-update stock data" || exit 0
           git push
