@@ -7,7 +7,7 @@ WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
 st.set_page_config(page_title="Jack株AI：全市場スキャナー", layout="wide")
-st.title("🚀 プライム市場1,600社 全件スキャン結果")
+st.title("🚀 プライム市場1,600社 全件スキャン")
 
 @st.cache_data
 def get_stock_name(ticker):
@@ -26,22 +26,18 @@ if os.path.exists(PRE_SCAN_FILE):
     if not hits:
         st.write("現在、極端な異常値を検知した銘柄はありません。")
     else:
-        st.subheader(f"💎 本日のお宝候補 ({len(hits)}件)")
-        
-        # 銘柄リストを整形して表示
+        st.subheader(f"💎 本日の極値検知銘柄 ({len(hits)}件)")
         selected = []
         for t, reason in hits.items():
             name = get_stock_name(t)
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                is_checked = st.checkbox(f"**{name}** ({t}) - {reason}", key=t)
-                if is_checked:
-                    selected.append({"ticker": t, "name": name})
+            # ✅ 日本語名でチェックボックスを表示
+            if st.checkbox(f"**{name}** ({t}) | {reason}", key=t):
+                selected.append({"ticker": t, "name": name})
         
-        if st.button("💾 選択した銘柄のリアルタイム監視を開始", type="primary"):
+        if st.button("💾 選択した銘柄でリアルタイム監視を開始", type="primary", use_container_width=True):
             with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(selected, f, ensure_ascii=False, indent=2)
-            st.success("GitHubへ監視指示を送信しました！")
+            st.success("GitHubへ指示を送りました。間もなく通知が始まります。")
             st.balloons()
 else:
-    st.warning("スキャン結果がありません。朝9:10の自動実行をお待ちください。")
+    st.warning("スキャン結果がありません。朝08:45の自動実行をお待ちください。")
