@@ -1,19 +1,21 @@
 import streamlit as st
 import json
 import os
+import yfinance as yf
 
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
-# 銘柄名辞書
-TICKER_NAMES = {
-    "2502.T": "アサヒ", "5401.T": "日本製鉄", "7267.T": "ホンダ",
-    "9020.T": "JR東日本", "9432.T": "NTT", "9433.T": "KDDI",
-    "1605.T": "INPEX", "7203.T": "トヨタ", "8035.T": "東エレク", "9984.T": "SBG"
-}
+st.set_page_config(page_title="Jack株AI：全市場スキャナー", layout="wide")
+st.title("🚀 プライム市場1,600社 全件スキャン結果")
 
-st.set_page_config(page_title="Jack株AI：ダッシュボード", layout="wide")
-st.title("☀️ 今朝の事前スキャン結果")
+@st.cache_data
+def get_stock_name(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        return t.info.get('shortName', ticker)
+    except:
+        return ticker
 
 if os.path.exists(PRE_SCAN_FILE):
     with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
@@ -22,25 +24,24 @@ if os.path.exists(PRE_SCAN_FILE):
     
     hits = data['hits']
     if not hits:
-        st.write("現在、条件に合う銘柄はありません。")
+        st.write("現在、極端な異常値を検知した銘柄はありません。")
     else:
-        # ✅ 修正：表示を和名にするための設定
-        def get_label(ticker):
-            name = TICKER_NAMES.get(ticker, "不明")
-            return f"{name} ({ticker})"
-
-        selected_tickers = st.multiselect(
-            "監視を開始する銘柄を選択（複数可）", 
-            options=list(hits.keys()),
-            default=list(hits.keys()),
-            format_func=get_label # ここで表示を日本語に変換
-        )
+        st.subheader(f"💎 本日のお宝候補 ({len(hits)}件)")
         
-        if st.button("💾 監視リストを保存して開始", type="primary", use_container_width=True):
-            final = [{"ticker": t, "name": TICKER_NAMES.get(t, t)} for t in selected_tickers]
+        # 銘柄リストを整形して表示
+        selected = []
+        for t, reason in hits.items():
+            name = get_stock_name(t)
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                is_checked = st.checkbox(f"**{name}** ({t}) - {reason}", key=t)
+                if is_checked:
+                    selected.append({"ticker": t, "name": name})
+        
+        if st.button("💾 選択した銘柄のリアルタイム監視を開始", type="primary"):
             with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
-                json.dump(final, f, ensure_ascii=False, indent=2)
+                json.dump(selected, f, ensure_ascii=False, indent=2)
+            st.success("GitHubへ監視指示を送信しました！")
             st.balloons()
-            st.success("GitHubへ保存しました。5分以内に監視が始まります。")
 else:
-    st.warning("スキャン結果がありません。GitHub Actionsの完了をお待ちください。")
+    st.warning("スキャン結果がありません。朝9:10の自動実行をお待ちください。")
