@@ -15,13 +15,13 @@ if os.path.exists(PRE_SCAN_FILE):
     
     hits = data['hits']
     if not hits:
-        st.write("条件一致なし")
+        st.write("現在、条件に合う銘柄はありません。")
     else:
-        selected = st.multiselect("監視する銘柄を選択", list(hits.keys()), default=list(hits.keys()))
-        if st.button("💾 監視リストを確定保存", type="primary"):
+        selected = st.multiselect("監視を開始する銘柄を選択", list(hits.keys()), default=list(hits.keys()))
+        if st.button("💾 監視リストを保存", type="primary"):
             final = [{"ticker": t, "reason": hits[t]} for t in selected]
             with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
                 json.dump(final, f, ensure_ascii=False, indent=2)
-            st.success("GitHubに保存しました。5分以内に監視が始まります。")
+            st.success("GitHubへ保存指示を出しました。数分後に監視が始まります。")
 else:
-    st.warning("データ未作成。GitHub Actionsの完了をお待ちください。")
+    st.warning("スキャン結果がありません。GitHub Actionsの手動実行を試してください。")
