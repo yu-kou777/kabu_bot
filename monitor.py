@@ -7,11 +7,17 @@ import time
 import numpy as np
 from datetime import datetime, timedelta, timezone, time as dt_time
 
-# --- ⚙️ 設定 ---
+# --- ⚙️ 基本設定 ---
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
+# JPXの公式サイトの銘柄一覧（Excel）のURL
 JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-banner/quote/tvdivq0000001vg2-att/data_j.xls"
+
+TICKER_NAMES = {
+    "2502.T": "アサヒ", "5401.T": "日本製鉄", "7267.T": "ホンダ",
+    "9020.T": "JR東日本", "9432.T": "NTT", "9433.T": "KDDI"
+}
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
@@ -24,12 +30,12 @@ def get_prime_tickers():
         df = pd.read_excel(res.content)
         # 「市場・商品区分」が「プライム（内国株式）」のものを抽出
         prime_df = df[df['市場・商品区分'].str.contains('プライム', na=False)]
-        tickers = [f"{code}.T" for code in prime_df['コード']]
+        tickers = [f"{int(code)}.T" for code in prime_df['コード']]
         print(f"✅ プライム市場 {len(tickers)} 銘柄を特定しました。")
         return tickers
     except Exception as e:
         print(f"❌ リスト取得失敗: {e}")
-        return ["9432.T", "7203.T", "9984.T"] # 失敗時のバックアップ
+        return list(TICKER_NAMES.keys()) # 失敗時は最低限のリストで動かす
 
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
@@ -40,7 +46,9 @@ def calculate_rsi(series, period=14):
 
 def calculate_rci(series, period=9):
     def rci_func(x):
-        n = len(x); d = np.array(range(n, 0, -1)); r = pd.Series(x).rank(method='min').values
+        n = len(x)
+        d = np.array(range(n, 0, -1))
+        r = pd.Series(x).rank(method='min').values
         return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
@@ -48,13 +56,12 @@ def calculate_rci(series, period=9):
 def run_full_daily_scan():
     tickers = get_prime_tickers()
     hits = {}
-    chunk_size = 50 # 50銘柄ずつ小分けにダウンロード（エラー回避）
+    chunk_size = 50 # Yahoo負荷対策
     
     print(f"📡 全件スキャン開始: {get_jst_now()}")
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i : i + chunk_size]
         try:
-            # 負荷を分散させながら取得
             data = yf.download(batch, period="1y", progress=False)['Close']
             for t in batch:
                 if t not in data or data[t].isnull().all(): continue
@@ -65,17 +72,66 @@ def run_full_daily_scan():
                 rci = calculate_rci(c, 9).iloc[-1]
                 
                 # ✅ ジャックさんの「お宝条件」
+                # RSI 20以下かつRCI -70以下（売られすぎ） OR RSI 90以上かつRCI 95以上（買われすぎ）
                 if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
-                    hits[t] = f"極値(RSI:{rsi:.0f}/RCI:{rci:.0f})"
-        except:
-            continue
-        time.sleep(2) # 2秒待機してYahooの制限を回避
-        if i % 200 == 0: print(f"📊 進捗: {i}/{len(tickers)} 銘柄完了...")
+                    status = "📉 底圏" if rsi <= 20 else "📈 天井"
+                    hits[t] = f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"
+                    print(f"✨ 検知: {t} {hits[t]}")
+        except: continue
+        time.sleep(2) # 2秒休憩
+        if i % 200 == 0: print(f"📊 進捗: {i}/{len(tickers)} 完了")
 
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f)
     
-    # Discordに完了報告
-    requests.post(DISCORD_URL, json={"content": f"✅ **【Jack株AI】全件スキャン完了**\n本日のお宝候補は **{len(hits)}件** です。"})
+    msg = f"✅ **【Jack株AI】全市場スキャン完了**\n本日のお宝候補は **{len(hits)}件** です。\nStreamlitを確認してください。"
+    requests.post(DISCORD_URL, json={"content": msg})
 
-# (monitor_cycle関数は以前と同じものを使用)
+# --- 🔔 2. 1分足リアルタイム監視 ---
+def monitor_cycle():
+    if not os.path.exists(WATCHLIST_FILE): return
+    with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+        watchlist = json.load(f)
+    if not watchlist: return
+
+    report_blocks = []
+    for item in watchlist:
+        t = item['ticker']
+        try:
+            df = yf.download(t, period="2d", interval="1m", progress=False)
+            c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+            ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
+            ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
+            bb_u2, bb_l2, bb_l3 = ma20 + std20*2, ma20 - std20*2, ma20 - std20*3
+            now_p = float(c.iloc[-1]); m60 = ma60.iloc[-1]; m200 = ma200.iloc[-1]
+            
+            sigs = []
+            # ジャックさんの8ルール
+            if now_p > m60:
+                if (df['High'].iloc[:,0].tail(15) >= bb_u2.tail(15)).sum() >= 3: sigs.append("⚠️法則1(売)")
+                if abs(now_p - m60) / m60 < 0.001: sigs.append("💎法則2(買)")
+            else:
+                if now_p <= bb_l3.iloc[-1]: sigs.append("⚠️法則4(買)")
+                if abs(now_p - m200) / m200 < 0.001: sigs.append("💎法則5(買)")
+                if (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
+            if m200 > m60 and abs(now_p - m200) / m200 < 0.001: sigs.append("⚠️法則3(売)")
+            
+            # 強さ判定
+            is_strong = (ma60.diff(5).iloc[-1] * ma200.diff(5).iloc[-1] > 0)
+            if sigs or is_strong:
+                name = TICKER_NAMES.get(t, t)
+                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}` | {' '.join(sigs)} {'💎法則8' if is_strong else ''}")
+        except: continue
+
+    if report_blocks:
+        msg = f"📢 **【Jack株AI：アルゴ検知】** ({get_jst_now().strftime('%H:%M')})\n" + "\n".join(report_blocks)
+        requests.post(DISCORD_URL, json={"content": msg})
+
+if __name__ == "__main__":
+    now = get_jst_now().time()
+    # 09:10-09:40 全件スキャン実行（時間がかかるため長めに確保）
+    if (dt_time(9, 10) <= now <= dt_time(9, 45)) or not os.path.exists(PRE_SCAN_FILE):
+        run_full_daily_scan()
+    # 市場時間中のみ監視
+    if (dt_time(9, 20) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
+        monitor_cycle()
