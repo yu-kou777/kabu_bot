@@ -3,29 +3,41 @@ name: Stock Monitor Loop
 on:
   schedule:
     - cron: '*/5 0-6 * * 1-5' # 平日 9:00-15:00 (JST)
-  workflow_dispatch:
+  workflow_dispatch: # 手動実行ボタン
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 👈 書き込み許可
+      contents: write
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # 全履歴を取得してrebaseを安定させる
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
-        run: pip install yfinance>=0.2.40 pandas requests numpy # 👈 yfinanceのバージョンを指定
+        run: pip install yfinance>=0.2.40 pandas requests numpy
+
       - name: Run Monitor
         run: python monitor.py
+
       - name: Commit and Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # ✅ 修正：個別にaddして、失敗しても次に進むように変更
+          
+          # ファイルが存在する場合のみ追加
           git add pre_scan_results.json || echo "pre_scan_results.json not found"
           git add jack_watchlist.json || echo "jack_watchlist.json not found"
-          git commit -m "Auto-update stock data" || exit 0
-          git push
+          
+          # 変更がある場合のみコミット
+          git commit -m "Auto-update stock data [skip ci]" || exit 0
+          
+          # ✅ 強制的に最新版を取り込んでからPush（競合回避）
+          git pull --rebase origin main
+          git push origin main
