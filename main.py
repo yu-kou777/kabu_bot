@@ -5,20 +5,23 @@ import os
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
-st.set_page_config(page_title="Jack株AI：ダッシュボード", layout="wide")
-st.title("☀️ 今朝の事前検知結果")
+st.set_page_config(page_title="Jack株AI", layout="wide")
+st.title("☀️ 今朝の事前スキャン結果")
 
 if os.path.exists(PRE_SCAN_FILE):
     with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    st.success(f"📅 データ更新日: {data['date']}")
+    st.info(f"📅 更新日: {data['date']}")
     
-    selected = st.multiselect("監視対象を選択", list(data['hits'].keys()), default=list(data['hits'].keys()))
-    
-    if st.button("💾 監視リストを保存してGitHubへ反映", type="primary"):
-        final = [{"ticker": t, "reason": data['hits'][t]} for t in selected]
-        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
-            json.dump(final, f, ensure_ascii=False, indent=2)
-        st.info("保存完了。次のGitHub Actionsの実行で監視が始まります。")
+    hits = data['hits']
+    if not hits:
+        st.write("条件一致なし")
+    else:
+        selected = st.multiselect("監視する銘柄を選択", list(hits.keys()), default=list(hits.keys()))
+        if st.button("💾 監視リストを確定保存", type="primary"):
+            final = [{"ticker": t, "reason": hits[t]} for t in selected]
+            with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump(final, f, ensure_ascii=False, indent=2)
+            st.success("GitHubに保存しました。5分以内に監視が始まります。")
 else:
-    st.warning("スキャンデータがありません。09:15の実行をお待ちください。")
+    st.warning("データ未作成。GitHub Actionsの完了をお待ちください。")
