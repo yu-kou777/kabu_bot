@@ -17,10 +17,8 @@ def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
 def send_discord(msg):
-    try:
-        requests.post(DISCORD_URL, json={"content": msg})
-    except:
-        print("Discord送信失敗")
+    try: requests.post(DISCORD_URL, json={"content": msg})
+    except: print("Discord送信失敗")
 
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
@@ -34,7 +32,7 @@ def calculate_rci(series, period=9):
         return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
-# --- 📡 1. 早朝の日足全件スキャン ---
+# --- 📡 1. 日足全件スキャン ---
 def run_full_daily_scan():
     send_discord("🔍 **【Jack株AI】プライム市場 1,600銘柄の全件スキャンを開始します...**")
     try:
@@ -44,7 +42,7 @@ def run_full_daily_scan():
         name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
         tickers = list(name_map.keys())
     except Exception as e:
-        send_discord(f"❌ 銘柄リストの取得に失敗しました: {e}"); return
+        send_discord(f"❌ 銘柄リスト取得失敗: {e}"); return
 
     hits = {}
     chunk_size = 50 
@@ -66,9 +64,9 @@ def run_full_daily_scan():
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
     
-    send_discord(f"✨ **【スキャン完了】** 本日のお宝候補は **{len(hits)}件** です。Streamlitを確認してください。")
+    send_discord(f"✨ **【スキャン完了】** 本日のお宝候補は **{len(hits)}件** です。和名でリスト化しました。")
 
-# --- 🔔 2. 1分足リアルタイム監視 ---
+# --- 🔔 2. 1分足監視 ---
 def monitor_cycle():
     if not os.path.exists(WATCHLIST_FILE): return
     with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
@@ -95,38 +93,23 @@ def monitor_cycle():
                 if now_p <= bb_l3.iloc[-1]: sigs.append("⚠️法則4(買)")
                 if abs(now_p - m200) / m200 < 0.001: sigs.append("💎法則5(買)")
                 if (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
-            if m200 > m60 and abs(now_p - m200) / m200 < 0.001: sigs.append("⚠️法則3(売)")
             
-            is_strong = (ma60.diff(5).iloc[-1] * ma200.diff(5).iloc[-1] > 0)
-            if sigs or is_strong:
-                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}円` | {' '.join(sigs)} {'💎法則8' if is_strong else ''}")
+            if sigs:
+                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}円` | {' '.join(sigs)}")
         except: continue
 
     if report_blocks:
-        msg = f"📢 **【Jack株AI：アルゴ検知】**\n" + "\n".join(report_blocks)
-        send_discord(msg)
+        send_discord(f"📢 **【Jack株AI：アルゴ検知】**\n" + "\n".join(report_blocks))
 
 if __name__ == "__main__":
-    now_dt = get_jst_now()
-    now = now_dt.time()
-    
-    # スキャンセクション
-    if (dt_time(8, 45) <= now <= dt_time(8, 50)):
+    now = get_jst_now().time()
+    # ✅ 朝08:45に全件スキャン
+    if (dt_time(8, 45) <= now <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
         run_full_daily_scan()
-    
-    # 監視開始・終了の通知ロジック
-    if dt_time(9, 0) <= now <= dt_time(9, 5):
-        send_discord("🌅 **【前場】リアルタイム監視を開始しました。** 爆益を狙いましょう！")
-    
-    if dt_time(11, 30) <= now <= dt_time(11, 35):
-        send_discord("☕ **【前場終了】お疲れ様です。お昼休みに入ります。**")
+    # 🌅 監視開始通知
+    if dt_time(9, 0) <= now <= dt_time(9, 5): send_discord("🌅 **【前場】リアルタイム監視を開始。**")
+    if dt_time(15, 10) <= now <= dt_time(15, 15): send_discord("🏁 **【大引け】本日の全監視を終了。**")
 
-    if dt_time(12, 35) <= now <= dt_time(12, 40):
-        send_discord("🚀 **【後場】監視を再開しました。午後の戦い開始です！**")
-
-    if dt_time(15, 10) <= now <= dt_time(15, 15):
-        send_discord("🏁 **【大引け】本日の全監視を終了しました。本日もお疲れ様でした！**")
-
-    # 実際の監視サイクル
     if (dt_time(9, 0) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
         monitor_cycle()
+
