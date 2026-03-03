@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone, time as dt_time
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
-# JPXの公式サイトの銘柄一覧（Excel）のURL
 JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-banner/quote/tvdivq0000001vg2-att/data_j.xls"
 
 TICKER_NAMES = {
@@ -35,7 +34,7 @@ def get_prime_tickers():
         return tickers
     except Exception as e:
         print(f"❌ リスト取得失敗: {e}")
-        return list(TICKER_NAMES.keys()) # 失敗時は最低限のリストで動かす
+        return list(TICKER_NAMES.keys())
 
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
@@ -52,11 +51,11 @@ def calculate_rci(series, period=9):
         return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
-# --- 📡 1. 朝の日足全件スキャン ---
+# --- 📡 1. 早朝の日足全件スキャン ---
 def run_full_daily_scan():
     tickers = get_prime_tickers()
     hits = {}
-    chunk_size = 50 # Yahoo負荷対策
+    chunk_size = 50 # サーバー負荷対策
     
     print(f"📡 全件スキャン開始: {get_jst_now()}")
     for i in range(0, len(tickers), chunk_size):
@@ -71,15 +70,13 @@ def run_full_daily_scan():
                 rsi = calculate_rsi(c, 14).iloc[-1]
                 rci = calculate_rci(c, 9).iloc[-1]
                 
-                # ✅ ジャックさんの「お宝条件」
-                # RSI 20以下かつRCI -70以下（売られすぎ） OR RSI 90以上かつRCI 95以上（買われすぎ）
+                # ✅ ジャックさんの極値条件（RSI 20以下/RCI -70以下など）
                 if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
                     status = "📉 底圏" if rsi <= 20 else "📈 天井"
                     hits[t] = f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"
-                    print(f"✨ 検知: {t} {hits[t]}")
         except: continue
-        time.sleep(2) # 2秒休憩
-        if i % 200 == 0: print(f"📊 進捗: {i}/{len(tickers)} 完了")
+        time.sleep(1) 
+        if i % 300 == 0: print(f"📊 スキャン進捗: {i}/{len(tickers)}...")
 
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f)
@@ -99,14 +96,19 @@ def monitor_cycle():
         t = item['ticker']
         try:
             df = yf.download(t, period="2d", interval="1m", progress=False)
+            # データの取り出しを確実に単一数値にする
             c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+            if c.empty: continue
+
             ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
             ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
             bb_u2, bb_l2, bb_l3 = ma20 + std20*2, ma20 - std20*2, ma20 - std20*3
-            now_p = float(c.iloc[-1]); m60 = ma60.iloc[-1]; m200 = ma200.iloc[-1]
+            
+            now_p = float(c.iloc[-1])
+            m60 = ma60.iloc[-1]; m200 = ma200.iloc[-1]
             
             sigs = []
-            # ジャックさんの8ルール
+            # ✅ ジャックさんの8ルール
             if now_p > m60:
                 if (df['High'].iloc[:,0].tail(15) >= bb_u2.tail(15)).sum() >= 3: sigs.append("⚠️法則1(売)")
                 if abs(now_p - m60) / m60 < 0.001: sigs.append("💎法則2(買)")
@@ -114,13 +116,15 @@ def monitor_cycle():
                 if now_p <= bb_l3.iloc[-1]: sigs.append("⚠️法則4(買)")
                 if abs(now_p - m200) / m200 < 0.001: sigs.append("💎法則5(買)")
                 if (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
+            
             if m200 > m60 and abs(now_p - m200) / m200 < 0.001: sigs.append("⚠️法則3(売)")
             
             # 強さ判定
             is_strong = (ma60.diff(5).iloc[-1] * ma200.diff(5).iloc[-1] > 0)
+            
             if sigs or is_strong:
                 name = TICKER_NAMES.get(t, t)
-                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}` | {' '.join(sigs)} {'💎法則8' if is_strong else ''}")
+                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}円` | {' '.join(sigs)} {'💎法則8' if is_strong else ''}")
         except: continue
 
     if report_blocks:
@@ -129,9 +133,9 @@ def monitor_cycle():
 
 if __name__ == "__main__":
     now = get_jst_now().time()
-    # 09:10-09:40 全件スキャン実行（時間がかかるため長めに確保）
-    if (dt_time(9, 10) <= now <= dt_time(9, 45)) or not os.path.exists(PRE_SCAN_FILE):
+    # ✅ 朝08:45からスキャン開始
+    if (dt_time(8, 45) <= now <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
         run_full_daily_scan()
-    # 市場時間中のみ監視
-    if (dt_time(9, 20) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
+    # 市場稼働中（前場・後場）
+    if (dt_time(9, 0) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
         monitor_cycle()
