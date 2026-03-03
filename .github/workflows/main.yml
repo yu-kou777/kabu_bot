@@ -2,14 +2,14 @@ name: Stock Monitor Loop
 
 on:
   schedule:
-    - cron: '*/5 0-6 * * 1-5' # 平日の日本時間 9:00-15:00 頃に5分おきに実行
-  workflow_dispatch: # 手動実行ボタン用
+    - cron: '*/5 0-6 * * 1-5' # 平日 9:00-15:00 (JST)
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 👈 これが重要！GitHubにファイルを書き込む許可
+      contents: write
     steps:
       - uses: actions/checkout@v3
       - name: Set up Python
@@ -24,6 +24,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add pre_scan_results.json jack_watchlist.json
-          git commit -m "Auto-update stock data" || exit 0
+          # ファイルが存在する場合のみ追加（エラー防止）
+          git add pre_scan_results.json jack_watchlist.json || true
+          git commit -m "Auto-update" || exit 0
           git push
