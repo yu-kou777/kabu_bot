@@ -16,6 +16,12 @@ JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-banner/quote/tvdivq0000
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
+def send_discord(msg):
+    try:
+        requests.post(DISCORD_URL, json={"content": msg})
+    except:
+        print("Discord送信失敗")
+
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
     delta = series.diff(); gain = (delta.where(delta > 0, 0)).rolling(period).mean()
@@ -30,21 +36,18 @@ def calculate_rci(series, period=9):
 
 # --- 📡 1. 早朝の日足全件スキャン ---
 def run_full_daily_scan():
-    print("🌐 JPXから最新の和名リストを取得中...")
+    send_discord("🔍 **【Jack株AI】プライム市場 1,600銘柄の全件スキャンを開始します...**")
     try:
         res = requests.get(JPX_LIST_URL)
         df = pd.read_excel(res.content)
         prime_df = df[df['市場・商品区分'].str.contains('プライム', na=False)]
-        # 和名辞書を作成 { "9432.T": "日本電信電話", ... }
         name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
         tickers = list(name_map.keys())
     except Exception as e:
-        print(f"❌ リスト取得失敗: {e}"); return
+        send_discord(f"❌ 銘柄リストの取得に失敗しました: {e}"); return
 
     hits = {}
     chunk_size = 50 
-    print(f"📡 全件スキャン開始（1,600銘柄）: {get_jst_now()}")
-    
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i : i + chunk_size]
         try:
@@ -54,23 +57,16 @@ def run_full_daily_scan():
                 c = data[t].dropna()
                 if len(c) < 30: continue
                 rsi = calculate_rsi(c, 14).iloc[-1]; rci = calculate_rci(c, 9).iloc[-1]
-                
-                # ✅ 極値検知
                 if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
                     status = "📉 底圏" if rsi <= 20 else "📈 天井"
-                    # 名前を辞書から取得して保存
-                    hits[t] = {
-                        "name": name_map.get(t, t),
-                        "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"
-                    }
+                    hits[t] = {"name": name_map.get(t, t), "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"}
         except: continue
         time.sleep(1)
-        if i % 300 == 0: print(f"📊 スキャン進捗: {i}/{len(tickers)}...")
 
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
     
-    requests.post(DISCORD_URL, json={"content": f"✅ **【Jack株AI】全件スキャン完了**\n本日のお宝候補は **{len(hits)}件** です。"})
+    send_discord(f"✨ **【スキャン完了】** 本日のお宝候補は **{len(hits)}件** です。Streamlitを確認してください。")
 
 # --- 🔔 2. 1分足リアルタイム監視 ---
 def monitor_cycle():
@@ -107,13 +103,30 @@ def monitor_cycle():
         except: continue
 
     if report_blocks:
-        msg = f"📢 **【Jack株AI：アルゴ検知】** ({get_jst_now().strftime('%H:%M')})\n" + "\n".join(report_blocks)
-        requests.post(DISCORD_URL, json={"content": msg})
+        msg = f"📢 **【Jack株AI：アルゴ検知】**\n" + "\n".join(report_blocks)
+        send_discord(msg)
 
 if __name__ == "__main__":
-    now = get_jst_now().time()
-    if (dt_time(8, 45) <= now <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
+    now_dt = get_jst_now()
+    now = now_dt.time()
+    
+    # スキャンセクション
+    if (dt_time(8, 45) <= now <= dt_time(8, 50)):
         run_full_daily_scan()
+    
+    # 監視開始・終了の通知ロジック
+    if dt_time(9, 0) <= now <= dt_time(9, 5):
+        send_discord("🌅 **【前場】リアルタイム監視を開始しました。** 爆益を狙いましょう！")
+    
+    if dt_time(11, 30) <= now <= dt_time(11, 35):
+        send_discord("☕ **【前場終了】お疲れ様です。お昼休みに入ります。**")
+
+    if dt_time(12, 35) <= now <= dt_time(12, 40):
+        send_discord("🚀 **【後場】監視を再開しました。午後の戦い開始です！**")
+
+    if dt_time(15, 10) <= now <= dt_time(15, 15):
+        send_discord("🏁 **【大引け】本日の全監視を終了しました。本日もお疲れ様でした！**")
+
+    # 実際の監視サイクル
     if (dt_time(9, 0) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
         monitor_cycle()
-
