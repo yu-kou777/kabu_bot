@@ -2,7 +2,7 @@ name: Stock Monitor Loop
 
 on:
   schedule:
-    - cron: '*/5 * * * *' # テスト用：常に5分おきに実行
+    - cron: '*/10 * * * *' # 10分おきに実行
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,11 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add pre_scan_results.json jack_watchlist.json || true
-          git commit -m "Test update [skip ci]" || exit 0
+          
+          # ファイルが存在する場合のみ追加
+          if [ -f pre_scan_results.json ]; then git add pre_scan_results.json; fi
+          if [ -f jack_watchlist.json ]; then git add jack_watchlist.json; fi
+          
+          git commit -m "Auto-update [skip ci]" || exit 0
           git pull --rebase origin main
           git push origin main
