@@ -1,13 +1,9 @@
 name: Stock Monitor Loop
-
 on:
   schedule:
-    # ✅ 日本時間 08:45 にスキャン開始（UTC 23:45）
-    - cron: '45 23 * * 0-4'
-    # ✅ 5分おきの定期監視
-    - cron: '*/5 0-6 * * 1-5'
+    - cron: '45 23 * * 0-4' # 日本時間 08:45（UTC 23:45）
+    - cron: '*/5 0-6 * * 1-5' # 5分おき
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,8 +25,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          if [ -f pre_scan_results.json ]; then git add pre_scan_results.json; fi
-          if [ -f jack_watchlist.json ]; then git add jack_watchlist.json; fi
-          git commit -m "System auto-update [skip ci]" || exit 0
+          git add pre_scan_results.json jack_watchlist.json || true
+          git commit -m "System update [skip ci]" || exit 0
           git pull --rebase origin main
           git push origin main
