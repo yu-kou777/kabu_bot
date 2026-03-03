@@ -1,9 +1,11 @@
 import streamlit as st
 import json
 import os
+import requests
 
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
+DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 st.set_page_config(page_title="Jack株AI", layout="wide")
 st.title("🚀 プライム市場1,600社 全件スキャン")
@@ -17,16 +19,15 @@ if os.path.exists(PRE_SCAN_FILE):
     if not hits:
         st.write("現在、異常値を検知した銘柄はありません。")
     else:
-        st.subheader(f"💎 本日のお宝候補 ({len(hits)}件)")
         selected = []
         for t, info in hits.items():
-            # ✅ 修正：データが古い形式（文字列）でもエラーにならないようにガード
+            # ✅ 旧データ（文字列）と新データ（辞書）を両方こなす
             if isinstance(info, dict):
                 name = info.get('name', t)
                 reason = info.get('reason', '')
             else:
                 name = t
-                reason = info # 古い形式の場合は文字をそのまま理由にする
+                reason = info
             
             if st.checkbox(f"**{name}** ({t}) | {reason}", key=t):
                 selected.append({"ticker": t, "name": name})
@@ -35,9 +36,10 @@ if os.path.exists(PRE_SCAN_FILE):
             if selected:
                 with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
                     json.dump(selected, f, ensure_ascii=False, indent=2)
+                
+                names = "、".join([s['name'] for s in selected])
+                requests.post(DISCORD_URL, json={"content": f"✅ **【監視リスト更新】**\n以下の銘柄の監視を受け付けました：\n`{names}`"})
                 st.success("監視を開始しました！Discordを確認してください。")
                 st.balloons()
-            else:
-                st.warning("銘柄を選択してください。")
 else:
     st.warning("スキャン結果がありません。朝08:45の自動実行をお待ちください。")
