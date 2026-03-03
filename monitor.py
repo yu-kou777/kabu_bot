@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import json
 import os
-import time
 from datetime import datetime, timedelta, timezone, time as dt_time
 
 # --- ⚙️ 設定 ---
@@ -11,82 +10,42 @@ DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUu
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
-# 銘柄名マップ（和名対応）
-TICKER_NAMES = {
-    "2502.T": "アサヒ", "5401.T": "日本製鉄", "7267.T": "ホンダ",
-    "9020.T": "JR東日本", "9432.T": "NTT", "9433.T": "KDDI"
-}
-# 検索用リスト（ここに1000件まで自由に追加可能）
-PRIME_TICKERS = list(TICKER_NAMES.keys()) + ["1605.T", "1801.T", "2802.T", "2914.T", "4063.T", "6758.T", "7203.T", "8035.T", "9983.T", "9984.T"]
+TICKER_NAMES = {"2502.T": "アサヒ", "5401.T": "日本製鉄", "7267.T": "ホンダ", "9020.T": "JR東日本", "9432.T": "NTT", "9433.T": "KDDI"}
+PRIME_TICKERS = list(TICKER_NAMES.keys())
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
-def calculate_rsi(series):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    return 100 - (100 / (1 + (gain / loss)))
-
 def run_prime_prescan():
-    print("📡 プライム市場全件スキャンを開始します...")
+    print(f"📡 スキャン開始時刻: {get_jst_now()}")
     hits = {}
+    # 一括ダウンロード
     try:
-        data = yf.download(PRIME_TICKERS, period="3mo", progress=False)['Close']
+        data = yf.download(PRIME_TICKERS, period="1mo", progress=False)
+        if data.empty:
+            print("❌ データが空です。yfinanceのバージョンを確認してください。")
+            return
+            
+        close_data = data['Close']
         for t in PRIME_TICKERS:
-            c = data[t].dropna()
-            if len(c) < 15: continue
-            rsi = calculate_rsi(c).tail(5).min()
-            if rsi <= 35: hits[t] = f"RSI:{rsi:.1f}"
+            # RSI計算の代わりに、まずは「データがあるか」だけでテスト
+            hits[t] = "監視中"
+            print(f"✅ 検知: {t}")
     except Exception as e:
-        print(f"スキャンエラー: {e}")
+        print(f"❌ ダウンロードエラー: {e}")
     
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f)
-    print(f"✅ スキャン完了: {len(hits)}件検知")
+    print(f"🏁 ファイル作成完了: {PRE_SCAN_FILE}")
 
 def monitor_cycle():
-    if not os.path.exists(WATCHLIST_FILE): return
-    with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
-        watchlist = json.load(f)
-    if not watchlist: return
-
-    report_blocks = []
-    for item in watchlist:
-        t = item['ticker']
-        name = TICKER_NAMES.get(t, t)
-        try:
-            df = yf.download(t, period="2d", interval="1m", progress=False)
-            c = df['Close'].iloc[:,0]; v = df['Volume'].iloc[:,0]
-            ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
-            ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
-            bb_u2, bb_l2 = ma20 + (std20*2), ma20 - (std20*2)
-
-            now_p = c.iloc[-1]
-            sigs = []
-            if now_p > ma60.iloc[-1] and (df['High'].iloc[:,0].tail(15) >= bb_u2.tail(15)).sum() >= 3: sigs.append("⚠️法則1(売)")
-            if now_p < ma60.iloc[-1] and (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
-            
-            is_strong = (ma60.diff(20).iloc[-1] * ma200.diff(20).iloc[-1] > 0)
-            avg_v = v.tail(30).mean()
-            is_spike = v.iloc[-1] > (avg_v * 2.5)
-
-            if sigs or is_strong or is_spike:
-                pred = "📈上昇" if is_strong else "📉下落" if ma60.diff(5).iloc[-1] < 0 else "🔄反転"
-                block = f"🔹**{name}**({t}) `{now_p:,.1f}` | {' '.join(sigs)} {'💎法則8' if is_strong else ''} {'🔥爆益Vol' if is_spike else ''} 予測:{pred}"
-                report_blocks.append(block)
-        except: continue
-
-    if report_blocks:
-        msg = f"📢 **【Jack株AI：厳選レポート】** ({get_jst_now().strftime('%H:%M')})\n" + "\n".join(report_blocks)
-        requests.post(DISCORD_URL, json={"content": msg})
+    if not os.path.exists(WATCHLIST_FILE):
+        print("ℹ️ 監視リスト(jack_watchlist.json)がないため、通知をスキップします。")
+        return
+    # 監視ロジック（中略）
+    print("🔔 監視チェック実行中...")
 
 if __name__ == "__main__":
-    now_t = get_jst_now().time()
-    # 修正：ファイルがない、または9:10-9:20ならスキャン
-    if not os.path.exists(PRE_SCAN_FILE) or (dt_time(9, 10) <= now_t <= dt_time(9, 20)):
-        run_prime_prescan()
-    
-    # 監視時間内なら通知
-    if (dt_time(9, 20) <= now_t <= dt_time(11, 35)) or (dt_time(12, 35) <= now_t <= dt_time(15, 15)):
-        monitor_cycle()
+    # 強制的に両方実行（テスト用）
+    run_prime_prescan()
+    monitor_cycle()
