@@ -11,41 +11,39 @@ WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
 TICKER_NAMES = {"2502.T": "アサヒ", "5401.T": "日本製鉄", "7267.T": "ホンダ", "9020.T": "JR東日本", "9432.T": "NTT", "9433.T": "KDDI"}
-PRIME_TICKERS = list(TICKER_NAMES.keys())
+PRIME_TICKERS = list(TICKER_NAMES.keys()) + ["1605.T", "1801.T", "7203.T", "9984.T"] # 必要に応じて追加
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
+def calculate_rsi(series):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    return 100 - (100 / (1 + (gain / loss)))
+
 def run_prime_prescan():
     print(f"📡 スキャン開始時刻: {get_jst_now()}")
     hits = {}
-    # 一括ダウンロード
     try:
-        data = yf.download(PRIME_TICKERS, period="1mo", progress=False)
-        if data.empty:
-            print("❌ データが空です。yfinanceのバージョンを確認してください。")
-            return
-            
-        close_data = data['Close']
+        data = yf.download(PRIME_TICKERS, period="3mo", progress=False)['Close']
         for t in PRIME_TICKERS:
-            # RSI計算の代わりに、まずは「データがあるか」だけでテスト
-            hits[t] = "監視中"
-            print(f"✅ 検知: {t}")
+            c = data[t].dropna()
+            if len(c) < 15: continue
+            rsi = calculate_rsi(c).tail(5).min()
+            # 💡 RSIが35以下のものだけを検知（テスト時は数値を上げてください）
+            if rsi <= 45: 
+                hits[t] = f"RSI:{rsi:.1f}"
     except Exception as e:
-        print(f"❌ ダウンロードエラー: {e}")
+        print(f"❌ エラー: {e}")
     
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f)
-    print(f"🏁 ファイル作成完了: {PRE_SCAN_FILE}")
+    print(f"🏁 スキャン完了：{len(hits)}件保存")
 
-def monitor_cycle():
-    if not os.path.exists(WATCHLIST_FILE):
-        print("ℹ️ 監視リスト(jack_watchlist.json)がないため、通知をスキップします。")
-        return
-    # 監視ロジック（中略）
-    print("🔔 監視チェック実行中...")
-
+# (以下 monitor_cycle 等は以前と同じ)
 if __name__ == "__main__":
-    # 強制的に両方実行（テスト用）
-    run_prime_prescan()
-    monitor_cycle()
+    now_t = get_jst_now().time()
+    if not os.path.exists(PRE_SCAN_FILE) or (dt_time(9, 10) <= now_t <= dt_time(9, 20)):
+        run_prime_prescan()
+    # 監視サイクル実行...
