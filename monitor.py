@@ -35,9 +35,9 @@ def calculate_rci(series, period=9):
         return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
-# --- 📡 1. 日足全件スキャン ---
+# --- 📡 1. 日足全件スキャン（高速版） ---
 def run_full_daily_scan():
-    send_discord("🔍 **【Jack株AI】プライム市場 1,600銘柄の全件スキャンを開始します...**")
+    send_discord("🔍 **【Jack株AI】プライム市場全件スキャン（高速モード）を開始...**")
     try:
         res = requests.get(JPX_LIST_URL)
         df = pd.read_excel(res.content)
@@ -45,33 +45,35 @@ def run_full_daily_scan():
         name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
         tickers = list(name_map.keys())
     except Exception as e:
-        send_discord(f"❌ 銘柄リスト取得失敗: {e}"); return
+        send_discord(f"❌ リスト取得失敗: {e}"); return
 
     hits = {}
-    chunk_size = 50 
+    chunk_size = 100 # 高速化のためチャンクを大きく
+    print(f"📡 全件スキャン開始: {get_jst_now()}")
+    
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i : i + chunk_size]
         try:
-            data = yf.download(batch, period="1y", progress=False)['Close']
+            # 💡 periodを1moに短縮して爆速化
+            data = yf.download(batch, period="1mo", progress=False)['Close']
             for t in batch:
                 if t not in data or data[t].isnull().all(): continue
                 c = data[t].dropna()
-                if len(c) < 30: continue
+                if len(c) < 20: continue
                 rsi = calculate_rsi(c, 14).iloc[-1]
                 rci = calculate_rci(c, 9).iloc[-1]
                 
-                # 極値判定
                 if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
                     status = "📉 底圏" if rsi <= 20 else "📈 天井"
                     hits[t] = {"name": name_map.get(t, t), "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"}
         except: continue
-        time.sleep(1)
+        time.sleep(1) # Yahoo負荷対策
 
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
-    send_discord(f"✨ **【スキャン完了】** お宝候補は **{len(hits)}件** です。Streamlitを確認してください。")
+    send_discord(f"✨ **【スキャン完了】** お宝候補は **{len(hits)}件** です。")
 
-# --- 🔔 2. 1分足リアルタイム監視 ---
+# --- 🔔 2. 1分足監視 ---
 def monitor_cycle():
     if not os.path.exists(WATCHLIST_FILE): return
     with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
@@ -87,17 +89,16 @@ def monitor_cycle():
             c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
             ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
             ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
-            bb_u2, bb_l2, bb_l3 = ma20 + std20*2, ma20 - std20*2, ma20 - std20*3
+            bb_u2, bb_l3 = ma20 + std20*2, ma20 - std20*3
             
             now_p = float(c.iloc[-1]); m60 = ma60.iloc[-1]; m200 = ma200.iloc[-1]
             sigs = []
             if now_p > m60:
-                if (df['High'].iloc[:,0].tail(15) >= bb_u2.tail(15)).sum() >= 3: sigs.append("⚠️法則1(売)")
+                if (df['High'].iloc[:,0].tail(10) >= bb_u2.tail(10)).any(): sigs.append("⚠️法則1(売)")
                 if abs(now_p - m60) / m60 < 0.001: sigs.append("💎法則2(買)")
             else:
                 if now_p <= bb_l3.iloc[-1]: sigs.append("⚠️法則4(買)")
                 if abs(now_p - m200) / m200 < 0.001: sigs.append("💎法則5(買)")
-                if (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
             
             if sigs:
                 report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}円` | {' '.join(sigs)}")
@@ -108,14 +109,10 @@ def monitor_cycle():
 
 if __name__ == "__main__":
     now = get_jst_now().time()
-    # 08:45にスキャン。ファイルがない場合も実行
     if (dt_time(8, 45) <= now <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
         run_full_daily_scan()
-    
-    # 挨拶通知
-    if dt_time(9, 0) <= now <= dt_time(9, 5): send_discord("🌅 **【前場】監視を開始しました。**")
-    if dt_time(15, 10) <= now <= dt_time(15, 15): send_discord("🏁 **【大引け】本日の監視を終了しました。**")
+    if dt_time(9, 0) <= now <= dt_time(9, 5): send_discord("🌅 **【前場】リアルタイム監視を開始。**")
+    if dt_time(15, 10) <= now <= dt_time(15, 15): send_discord("🏁 **【大引け】本日の全監視を終了。**")
 
-    # 取引時間中のみ監視実行（自動停止）
     if (dt_time(9, 0) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
         monitor_cycle()
