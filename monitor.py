@@ -1,97 +1,121 @@
-import streamlit as st
-import json
-import os
 import yfinance as yf
 import pandas as pd
+import requests
+import json
+import os
+import time
 import numpy as np
+from datetime import datetime, timedelta, timezone, time as dt_time
 
-# --- 設定 ---
+# --- ⚙️ 基本設定 ---
+DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
+JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-banner/quote/tvdivq0000001vg2-att/data_j.xls"
 
-st.set_page_config(page_title="Jack株AI：司令塔", layout="wide")
+def get_jst_now():
+    return datetime.now(timezone(timedelta(hours=9)))
 
-# --- 共通計算関数 ---
-def get_status(ticker):
-    """現在の銘柄が法則にどれくらい近いか判定する"""
+def send_discord(msg):
+    try: requests.post(DISCORD_URL, json={"content": msg}, timeout=10)
+    except: print("Discord送信失敗")
+
+# --- 📈 テクニカル計算 ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    return 100 - (100 / (1 + (gain / loss)))
+
+def calculate_rci(series, period=9):
+    def rci_func(x):
+        n = len(x)
+        d = np.array(range(n, 0, -1))
+        r = pd.Series(x).rank(method='min').values
+        return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
+    return series.rolling(window=period).apply(rci_func)
+
+# --- 📡 1. 日足全件スキャン ---
+def run_full_daily_scan():
+    send_discord("🔍 **【Jack株AI】プライム市場 1,600銘柄の全件スキャンを開始します...**")
     try:
-        df = yf.download(ticker, period="2d", interval="1m", progress=False)
-        c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-        ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
-        ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
-        bb_u2, bb_l3 = ma20 + std20*2, ma20 - std20*3
-        
-        now_p = float(c.iloc[-1])
-        m60 = ma60.iloc[-1]
-        m200 = ma200.iloc[-1]
-        
-        # 法則判定
-        active_rules = []
-        if now_p > m60:
-            if now_p >= bb_u2.iloc[-1]: active_rules.append("法則1(警戒)")
-            if abs(now_p - m60) / m60 < 0.001: active_rules.append("法則2(チャンス)")
-        else:
-            if now_p <= bb_l3.iloc[-1]: active_rules.append("法則4(チャンス)")
-            if abs(now_p - m200) / m200 < 0.001: active_rules.append("法則5(チャンス)")
-            
-        return {
-            "現在値": f"{now_p:,.1f}",
-            "MA60乖離": f"{((now_p/m60)-1)*100:.2f}%",
-            "MA200乖離": f"{((now_p/m200)-1)*100:.2f}%",
-            "検知状況": " / ".join(active_rules) if active_rules else "監視中（静観）"
-        }
-    except:
-        return {"現在値": "取得不可", "MA60乖離": "-", "MA200乖離": "-", "検知状況": "停止中"}
+        res = requests.get(JPX_LIST_URL)
+        df = pd.read_excel(res.content)
+        prime_df = df[df['市場・商品区分'].str.contains('プライム', na=False)]
+        name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
+        tickers = list(name_map.keys())
+    except Exception as e:
+        send_discord(f"❌ 銘柄リスト取得失敗: {e}"); return
 
-# --- サイドバー：コントロールパネル ---
-st.sidebar.title("🎮 操作パネル")
-if st.sidebar.button("🔍 今すぐ全市場スキャンを予約", use_container_width=True):
-    st.sidebar.info("GitHub Actionsでスキャンを開始してください。完了すると下のリストが更新されます。")
+    hits = {}
+    chunk_size = 50 
+    for i in range(0, len(tickers), chunk_size):
+        batch = tickers[i : i + chunk_size]
+        try:
+            data = yf.download(batch, period="1y", progress=False)['Close']
+            for t in batch:
+                if t not in data or data[t].isnull().all(): continue
+                c = data[t].dropna()
+                if len(c) < 30: continue
+                rsi = calculate_rsi(c, 14).iloc[-1]
+                rci = calculate_rci(c, 9).iloc[-1]
+                
+                # 極値判定
+                if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
+                    status = "📉 底圏" if rsi <= 20 else "📈 天井"
+                    hits[t] = {"name": name_map.get(t, t), "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"}
+        except: continue
+        time.sleep(1)
 
-# --- メイン画面：監視状況の可視化 ---
-st.title("📊 リアルタイム監視ダッシュボード")
-if os.path.exists(WATCHLIST_FILE):
+    with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
+        json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
+    send_discord(f"✨ **【スキャン完了】** お宝候補は **{len(hits)}件** です。Streamlitを確認してください。")
+
+# --- 🔔 2. 1分足リアルタイム監視 ---
+def monitor_cycle():
+    if not os.path.exists(WATCHLIST_FILE): return
     with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
         watchlist = json.load(f)
-    
-    if watchlist:
-        monitor_data = []
-        for item in watchlist:
-            stat = get_status(item['ticker'])
-            monitor_data.append({
-                "銘柄": item.get('name', item['ticker']),
-                "コード": item['ticker'],
-                "現在値": stat["現在値"],
-                "MA60乖離": stat["MA60乖離"],
-                "MA200乖離": stat["MA200乖離"],
-                "状況": stat["検知状況"]
-            })
-        st.table(pd.DataFrame(monitor_data))
-    else:
-        st.write("現在、監視中の銘柄はありません。")
-else:
-    st.write("監視リストが空です。")
+    if not watchlist: return
 
-st.divider()
+    report_blocks = []
+    for item in watchlist:
+        t = item['ticker']
+        name = item.get('name', t)
+        try:
+            df = yf.download(t, period="2d", interval="1m", progress=False)
+            c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+            ma60, ma200 = c.rolling(60).mean(), c.rolling(200).mean()
+            ma20 = c.rolling(20).mean(); std20 = c.rolling(20).std()
+            bb_u2, bb_l2, bb_l3 = ma20 + std20*2, ma20 - std20*2, ma20 - std20*3
+            
+            now_p = float(c.iloc[-1]); m60 = ma60.iloc[-1]; m200 = ma200.iloc[-1]
+            sigs = []
+            if now_p > m60:
+                if (df['High'].iloc[:,0].tail(15) >= bb_u2.tail(15)).sum() >= 3: sigs.append("⚠️法則1(売)")
+                if abs(now_p - m60) / m60 < 0.001: sigs.append("💎法則2(買)")
+            else:
+                if now_p <= bb_l3.iloc[-1]: sigs.append("⚠️法則4(買)")
+                if abs(now_p - m200) / m200 < 0.001: sigs.append("💎法則5(買)")
+                if (df['Low'].iloc[:,0].tail(15) <= bb_l2.tail(15)).sum() >= 3: sigs.append("⚠️法則7(買)")
+            
+            if sigs:
+                report_blocks.append(f"🔹**{name}**({t}) `{now_p:,.1f}円` | {' '.join(sigs)}")
+        except: continue
 
-# --- スキャン結果と登録 ---
-st.header("✨ スキャン結果からの登録")
-if os.path.exists(PRE_SCAN_FILE):
-    with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    st.caption(f"最終スキャン：{data['date']}")
+    if report_blocks:
+        send_discord(f"📢 **【Jack株AI：アルゴ検知】**\n" + "\n".join(report_blocks))
+
+if __name__ == "__main__":
+    now = get_jst_now().time()
+    # 08:45にスキャン。ファイルがない場合も実行
+    if (dt_time(8, 45) <= now <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
+        run_full_daily_scan()
     
-    hits = data['hits']
-    selected = []
-    cols = st.columns(3)
-    for i, (t, info) in enumerate(hits.items()):
-        with cols[i % 3]:
-            name = info.get('name', t)
-            if st.checkbox(f"**{name}** ({t})\n{info.get('reason','')}", key=f"check_{t}"):
-                selected.append({"ticker": t, "name": name})
-    
-    if st.button("🚀 選択した銘柄を監視リストに登録", type="primary"):
-        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
-            json.dump(selected, f, ensure_ascii=False, indent=2)
-        st.success(f"{len(selected)} 銘柄の監視を開始しました！")
-        st.balloons()
+    # 挨拶通知
+    if dt_time(9, 0) <= now <= dt_time(9, 5): send_discord("🌅 **【前場】監視を開始しました。**")
+    if dt_time(15, 10) <= now <= dt_time(15, 15): send_discord("🏁 **【大引け】本日の監視を終了しました。**")
+
+    # 取引時間中のみ監視実行（自動停止）
+    if (dt_time(9, 0) <= now <= dt_time(11, 35)) or (dt_time(12, 35) <= now <= dt_time(15, 15)):
+        monitor_cycle()
