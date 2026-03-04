@@ -4,6 +4,8 @@ import requests
 import json
 import os
 import time
+import io
+import random
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 PRE_SCAN_FILE = "pre_scan_results.json"
 WATCHLIST_FILE = "jack_watchlist.json"
+JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-banner/quote/tvdivq0000001vg2-att/data_j.xls"
 
 def get_jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
@@ -19,69 +22,72 @@ def send_discord(msg):
     try: requests.post(DISCORD_URL, json={"content": msg}, timeout=10)
     except: print(f"Discord送信失敗")
 
-# --- 📈 RSI計算ロジック ---
 def calculate_rsi(series, period=14):
     if len(series) < period: return pd.Series([np.nan]*len(series))
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    return 100 - (100 / (1 + (gain / loss)))
 
-# --- 📋 ターゲット銘柄 (主要600銘柄への道：まずは代表的なものを定義) ---
-def get_prime_600_list():
-    # 💡 ここでは代表的なものを記載。必要に応じてリストを増やせます
-    # 完全に600銘柄にするには、リストファイルを別途読み込むのが理想的です
-    base_tickers = {
-        "7203.T":"トヨタ", "9432.T":"NTT", "9984.T":"SBG", "6758.T":"ソニーG", "8306.T":"三菱UFJ",
-        "8035.T":"東エレク", "6098.T":"リクルート", "4502.T":"武田", "2502.T":"アサヒ", "5401.T":"日本製鉄",
-        "7267.T":"ホンダ", "9020.T":"JR東日本", "9433.T":"KDDI", "4063.T":"信越化", "6501.T":"日立",
-        "6954.T":"ファナック", "4519.T":"中外薬", "6273.T":"SMC", "6367.T":"ダイキン", "3382.T":"7&i",
-        "8001.T":"伊藤忠", "8058.T":"三菱商", "4503.T":"アステラス", "6723.T":"ルネサス", "6857.T":"アドバンテ"
-        # ... ここに銘柄を追加していくことで600銘柄まで拡張可能
-    }
-    return base_tickers
+# --- 📋 ターゲット600銘柄の選定 ---
+def get_600_tickers():
+    try:
+        # User-Agentを偽装してJPXから取得
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(JPX_LIST_URL, headers=headers, timeout=30)
+        df = pd.read_excel(io.BytesIO(res.content), engine='xlrd')
+        prime_df = df[df['市場・商品区分'].str.contains('プライム|Prime', na=False)].head(600)
+        return {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
+    except:
+        # JPXに拒否された場合の予備リスト
+        return {"7203.T":"トヨタ", "9432.T":"NTT", "9984.T":"SBG", "6758.T":"ソニーG", "8306.T":"三菱UFJ"}
 
 # --- 📡 実行エンジン ---
-def run_stealth_scan():
-    send_discord("🔍 **【Jack株AI】ブロック回避・600銘柄バッチスキャンを開始...**")
-    name_map = get_prime_600_list()
+def run_slow_scan():
+    send_discord("🔍 **【Jack株AI】600銘柄の超低速スキャンを開始します...（推定完了：1時間後）**")
+    name_map = get_600_tickers()
     tickers = list(name_map.keys())
     hits = {}
     
-    # 💡 ブロックを避けるためのバッチサイズ (50銘柄ずつ)
-    batch_size = 50
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i : i + batch_size]
-        print(f"📦 バッチ処理中 ({i+1}/{len(tickers)})...")
-        
+    print(f"📡 総ターゲット: {len(tickers)} 銘柄")
+    
+    for i, t in enumerate(tickers):
         try:
-            # 💡 セッションをシミュレートしてお行儀よく取得
-            data = yf.download(batch, period="1mo", interval="1d", progress=False, threads=False)
-            close_data = data['Close'] if 'Close' in data else data
+            # 💡 1銘柄ずつ個別に取得（一括ダウンロードを避ける）
+            ticker_obj = yf.Ticker(t)
+            data = ticker_obj.history(period="1mo")
             
-            for t in batch:
-                try:
-                    c = close_data[t].dropna() if isinstance(close_data, pd.DataFrame) else close_data.dropna()
-                    if len(c) < 15: continue
-                    rsi = calculate_rsi(c, 14).iloc[-1]
-                    
-                    # 逆張りチャンス判定
-                    if not np.isnan(rsi) and (rsi <= 30 or rsi >= 70):
-                        status = "📉 底圏" if rsi <= 30 else "📈 天井"
-                        hits[t] = {"name": name_map[t], "reason": f"{status}(RSI:{rsi:.0f})"}
-                except: continue
+            if not data.empty:
+                c = data['Close']
+                rsi = calculate_rsi(c, 14).iloc[-1]
+                
+                # RSI 30以下 または 70以上
+                if not np.isnan(rsi) and (rsi <= 30 or rsi >= 70):
+                    status = "📉 底圏" if rsi <= 30 else "📈 天井"
+                    hits[t] = {"name": name_map[t], "reason": f"{status}(RSI:{rsi:.0f})"}
+                    print(f"✨ ヒット: {name_map[t]} ({t}) RSI:{rsi:.1f}")
+            
         except Exception as e:
-            print(f"Batch Error: {e}")
-            time.sleep(30) # エラー時は30秒待機
+            print(f"❌ {t} エラー: {e}")
+            time.sleep(10) # エラー時は長めに休む
         
-        time.sleep(15) # バッチ間に15秒の休憩（Yahoo対策）
+        # ✅ 重要：1銘柄ごとに3〜7秒のランダム休憩を入れる（人間らしさの演出）
+        wait_time = random.uniform(3, 7)
+        time.sleep(wait_time)
+        
+        if (i + 1) % 50 == 0:
+            print(f"📊 進捗: {i+1}/{len(tickers)} 完了...")
+            # 50銘柄ごとにファイルを中間保存
+            temp_data = {"date": get_jst_now().strftime('%Y-%m-%d %H:%M'), "hits": hits}
+            with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
+                json.dump(temp_data, f, ensure_ascii=False, indent=2)
 
-    # 強制保存
-    result = {"date": get_jst_now().strftime('%Y-%m-%d %H:%M'), "hits": hits}
+    # 最終保存
+    result_data = {"date": get_jst_now().strftime('%Y-%m-%d %H:%M'), "hits": hits}
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    send_discord(f"✨ **【スキャン完了】** 候補銘柄：{len(hits)}件が見つかりました。")
+        json.dump(result_data, f, ensure_ascii=False, indent=2)
+    
+    send_discord(f"✨ **【スキャン完了】** 全600銘柄の精査が終わりました。候補：**{len(hits)}件**")
 
 if __name__ == "__main__":
-    run_stealth_scan()
+    run_slow_scan()
