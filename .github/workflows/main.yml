@@ -1,58 +1,31 @@
 name: Stock Monitor Loop
-
 on:
   schedule:
-    # 1. 日本時間 08:45 (UTC 23:45) に日次フルスキャンを開始
-    - cron: '45 23 * * 0-4'
-    # 2. 日本時間 09:00-15:00 の間、5分おきに監視サイクルを実行
-    - cron: '*/5 0-6 * * 1-5'
-  # GitHubのボタンからいつでも手動で実行可能にする
+    - cron: '45 23 * * 0-4' # 08:45開始
+    - cron: '*/5 0-6 * * 1-5' # 5分おき監視
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    # GitHubにファイルを書き込むための権限設定
     permissions:
       contents: write
-
     steps:
-      # 1. コードのチェックアウト
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-
-      # 2. Pythonのセットアップ
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      # 3. 必要なライブラリのインストール
       - name: Install dependencies
-        run: |
-          pip install yfinance==0.2.54 pandas requests numpy xlrd openpyxl
-
-      # 4. 監視・スキャンプログラムの実行
+        run: pip install yfinance==0.2.54 pandas requests numpy xlrd
       - name: Run Monitor
         run: python monitor.py
-
-      # 5. 変更されたJSONファイルをリポジトリに保存（プッシュ）
-      - name: Commit and Push changes
+      - name: Commit and Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          
-          # ✅ 改善点: 全ての変更(JSONの新規作成/更新)を確実にステージング
           git add .
-          
-          # 変更がある場合のみコミット（変更がない場合はスキップしてエラーを防ぐ）
-          if ! git diff --cached --exit-code --quiet; then
-            git commit -m "📊 Auto-update: Scan results and Watchlist [skip ci]"
-            # 競合を防ぐために最新の状態を取り込んでからプッシュ
-            git pull --rebase origin main
-            git push origin main
-          else
-            echo "No changes to commit. Skipping push."
-          fi
+          git commit -m "Auto-update: 600-batch scan results" || exit 0
+          git pull --rebase origin main
+          git push origin main
