@@ -6,7 +6,7 @@ import os
 import time
 import io
 import numpy as np
-from datetime import datetime, timedelta, timezone, time as dt_time
+from datetime import datetime, timedelta, timezone
 
 # --- ⚙️ 設定 ---
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
@@ -20,70 +20,65 @@ def get_jst_now():
 
 def send_discord(msg):
     try: requests.post(DISCORD_URL, json={"content": msg}, timeout=10)
-    except: print(f"Discord送信失敗")
+    except: print(f"Discord送信失敗: {msg}")
 
 def calculate_rsi(series, period=14):
     if len(series) < period: return pd.Series([np.nan]*len(series))
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    delta = series.diff(); gain = (delta.where(delta > 0, 0)).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
-# --- 📡 600銘柄ずつ高速スキャン ---
+# --- 📡 600銘柄バッチ・高速スキャン ---
 def run_batch_scan():
-    send_discord("🔍 **【Jack株AI】プライム全市場 600銘柄バッチ・高速スキャンを開始します...**")
+    print("🚀 600銘柄バッチ・スキャンを開始します...")
+    send_discord("🔍 **【Jack株AI】600銘柄バッチ・スキャンを即時実行します...**")
     
     name_map = {}
     try:
         res = requests.get(JPX_LIST_URL, headers=HEADERS, timeout=30)
         df = pd.read_excel(io.BytesIO(res.content), engine='xlrd')
         prime_df = df[df['市場・商品区分'].str.contains('プライム|Prime', na=False)]
-        name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
+        name_map = {f"{int(row['コード'])}.T": row['銘銘名'] for _, row in prime_df.iterrows()}
     except Exception as e:
+        print(f"JPX Error: {e}")
         send_discord(f"⚠️ リスト取得失敗: {e}"); return
 
     tickers = list(name_map.keys())
     hits = {}
-    # ✅ 改善：600銘柄ずつの塊で処理
-    batch_size = 600
+    batch_size = 600 # 💡 600銘柄ずつまとめて取得
     
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i : i + batch_size]
-        print(f"📦 バッチ処理中: {i+1}〜{min(i+batch_size, len(tickers))} 銘柄目")
+        print(f"📦 バッチ取得中: {i+1}〜{min(i+batch_size, len(tickers))} 銘柄")
         
         try:
-            # 💡 一気に600銘柄のデータを取得（期間を1moに絞って高速化）
-            data = yf.download(batch, period="1mo", interval="1d", progress=False, threads=False)
+            # 高速化のため期間を1moに絞り、threads=Falseでお行儀よく取得
+            data = yf.download(batch, period="1mo", progress=False, threads=False)
             close_data = data['Close']
             
             for t in batch:
                 try:
-                    # 個別銘柄のデータを抽出
-                    if isinstance(close_data, pd.DataFrame):
-                        c = close_data[t].dropna()
-                    else:
-                        c = close_data.dropna()
-                        
+                    c = close_data[t].dropna() if isinstance(close_data, pd.DataFrame) else close_data.dropna()
                     if len(c) < 15: continue
                     rsi = calculate_rsi(c, 14).iloc[-1]
                     
-                    # お宝判定（RSI 25以下 または 80以上）
-                    if not np.isnan(rsi) and (rsi <= 25 or rsi >= 80):
-                        status = "📉 底圏" if rsi <= 25 else "📈 天井"
+                    # お宝条件：RSI 30以下 または 70以上
+                    if not np.isnan(rsi) and (rsi <= 30 or rsi >= 70):
+                        status = "📉 底圏" if rsi <= 30 else "📈 天井"
                         hits[t] = {"name": name_map[t], "reason": f"{status}(RSI:{rsi:.0f})"}
                 except: continue
         except Exception as e:
             print(f"Batch Error: {e}")
         
-        # バッチ間に少しだけ休憩（Yahooの機嫌取り）
-        time.sleep(10)
+        time.sleep(10) # バッチ間のインターバル（Yahoo対策）
 
-    # 結果保存
+    # 常に新しい日付で保存
     result_data = {"date": get_jst_now().strftime('%Y-%m-%d %H:%M'), "hits": hits}
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
     
-    send_discord(f"✨ **【スキャン完了】** 処理時間を大幅短縮しました。候補：**{len(hits)}件**")
+    send_discord(f"✨ **【スキャン完了】** 候補銘柄は **{len(hits)}件** です。")
 
 if __name__ == "__main__":
+    # 💡 時刻判定をなくし、実行されたら必ずスキャンするようにしました
     run_batch_scan()
