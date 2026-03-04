@@ -32,29 +32,33 @@ def get_prime_tickers():
 
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
-    delta = series.diff(); gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
 def calculate_rci(series, period=9):
     def rci_func(x):
-        n = len(x); d = np.array(range(n, 0, -1)); r = pd.Series(x).rank(method='min').values
+        n = len(x)
+        d = np.array(range(n, 0, -1))
+        r = pd.Series(x).rank(method='min').values
         return (1 - 6 * sum((d - r)**2) / (n * (n**2 - 1))) * 100
     return series.rolling(window=period).apply(rci_func)
 
-# --- 📡 1. 高速日足全件スキャン ---
+# --- 📡 1. 日足高速全件スキャン ---
 def run_full_daily_scan():
-    send_discord("🔍 **【Jack株AI】全市場スキャンを開始します（和名データ更新中）...**")
+    send_discord("🔍 **【Jack株AI】最新の和名データへ更新を開始します...**")
     name_map = get_prime_tickers()
     if not name_map: return
     
     tickers = list(name_map.keys())
     hits = {}
-    chunk_size = 100
+    chunk_size = 100 # 100件ずつ高速処理
     
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i : i + chunk_size]
         try:
+            # 高速化のため期間を1ヶ月(1mo)に限定
             data = yf.download(batch, period="1mo", progress=False)['Close']
             for t in batch:
                 if t not in data or data[t].isnull().all(): continue
@@ -70,7 +74,7 @@ def run_full_daily_scan():
 
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
         json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
-    send_discord(f"✨ **【スキャン完了】** 最新の和名リストを生成しました。")
+    send_discord(f"✨ **【更新完了】** 3月5日の最新お宝リストが完成しました。")
 
 # --- 🔔 2. 1分足リアルタイム監視 ---
 def monitor_cycle():
@@ -108,16 +112,14 @@ if __name__ == "__main__":
     now_t = now_jst.time()
     today_str = now_jst.strftime('%Y-%m-%d')
     
-    # ファイルの日付チェック
-    last_scan_date = ""
+    # ✅ 判定：今日まだスキャンしていない、または朝の定刻なら実行
+    last_date = ""
     if os.path.exists(PRE_SCAN_FILE):
         with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
-            last_scan_date = json.load(f).get('date', "")
+            last_date = json.load(f).get('date', "")
 
-    # ✅ 判定：今日まだスキャンしていない、または定刻なら実行
-    if (last_scan_date != today_str and now_t > dt_time(8, 0)) or (dt_time(8, 45) <= now_t <= dt_time(9, 30)) or not os.path.exists(PRE_SCAN_FILE):
+    if (last_date != today_str) or (dt_time(8, 45) <= now_t <= dt_time(9, 30)):
         run_full_daily_scan()
     
-    # 市場時間中の監視
     if (dt_time(9, 0) <= now_t <= dt_time(11, 35)) or (dt_time(12, 35) <= now_t <= dt_time(15, 15)):
         monitor_cycle()
