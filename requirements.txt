@@ -1,4 +1,6 @@
-yfinance>=0.2.40
+streamlit
+yfinance
 pandas
 requests
+xlrd>=2.0.1
 numpy
