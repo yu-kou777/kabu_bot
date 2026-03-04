@@ -8,7 +8,7 @@ import time
 WATCHLIST_FILE = "jack_watchlist.json"
 PRE_SCAN_FILE = "pre_scan_results.json"
 
-st.set_page_config(page_title="Jack株AI", layout="wide")
+st.set_page_config(page_title="Jack株AI：ダッシュボード", layout="wide")
 
 def calculate_rsi(series, period=14):
     delta = series.diff(); gain = (delta.where(delta > 0, 0)).rolling(period).mean()
@@ -17,36 +17,46 @@ def calculate_rsi(series, period=14):
 
 def fetch_status(ticker):
     try:
+        # 直近の1分足を取得
         df = yf.download(ticker, period="1d", interval="1m", progress=False)
         c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+        ma60 = c.rolling(60).mean()
         rsi_val = calculate_rsi(c, 14).iloc[-1]
-        now_p = float(c.iloc[-1])
-        return [now_p, round(rsi_val, 1), "監視中"]
-    except: return [0.0, 0.0, "待機中"]
+        now_p = float(c.iloc[-1]); m60 = ma60.iloc[-1]
+        diff60 = ((now_p / m60) - 1) * 100
+        return [now_p, round(rsi_val, 1), round(diff60, 2), "監視中"]
+    except: return [0.0, 0.0, 0.0, "待機中"]
 
-st.title("📊 リアルタイム監視 (RSI対応版)")
+# --- メイン画面 ---
+st.title("📊 リアルタイム監視ダッシュボード")
 
-# ✅ サイドバー：自動更新スイッチ
+# 自動更新スイッチ
 auto_refresh = st.sidebar.toggle("⏱️ 1分おきに自動更新", value=False)
 
 if os.path.exists(WATCHLIST_FILE):
     with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
         watchlist = json.load(f)
     if watchlist:
+        st.subheader("現在の監視銘柄ステータス")
         rows = [[item['name'], item['ticker']] + fetch_status(item['ticker']) for item in watchlist]
-        df = pd.DataFrame(rows, columns=["銘柄名", "コード", "現在値", "RSI", "状況"])
-        # RSIが低い（青）高い（赤）に色付け
+        df = pd.DataFrame(rows, columns=["銘柄名", "コード", "現在値", "RSI", "MA60乖離", "状況"])
+        
+        # RSIに応じた色付け
         st.dataframe(df.style.highlight_between(left=0, right=30, subset=['RSI'], color='#e1f5fe')
                            .highlight_between(left=75, right=100, subset=['RSI'], color='#ffebee'), 
                      use_container_width=True)
+    else:
+        st.info("監視リストが空です。")
 
 st.divider()
 
-st.header("✨ お宝スキャン結果")
+# スキャン結果
+st.header("✨ 全市場スキャン結果 (600バッチ処理)")
 if os.path.exists(PRE_SCAN_FILE):
     with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    st.info(f"📅 スキャン日: {data.get('date', '不明')}")
+    st.info(f"📅 最終更新: {data.get('date', '不明')}")
+    
     hits = data.get('hits', {})
     selected = []
     keys = list(hits.keys())
@@ -57,15 +67,14 @@ if os.path.exists(PRE_SCAN_FILE):
                 t = keys[i+j]
                 info = hits[t]
                 name = info.get('name', t) if isinstance(info, dict) else t
-                if st.checkbox(f"**{name}** ({t})", key=f"sel_{t}"):
+                if st.checkbox(f"**{name}** ({t})\n{info.get('reason','')}", key=f"sel_{t}"):
                     selected.append({"ticker": t, "name": name})
     
-    if st.button("💾 監視を開始する", type="primary"):
+    if st.button("💾 選択した銘柄で監視を開始", type="primary", use_container_width=True):
         with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
             json.dump(selected, f, ensure_ascii=False, indent=2)
-        st.success("リストを更新しました！")
+        st.success("リストを更新しました。GitHub Actionsの監視サイクルが始まります。")
 
-# ✅ 自動更新ロジック
 if auto_refresh:
     time.sleep(60)
     st.rerun()
