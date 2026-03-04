@@ -26,7 +26,7 @@ def fetch_status(ticker):
 
 st.title("📊 リアルタイム監視 (RSI対応版)")
 
-# ✅ 自動更新スイッチ
+# ✅ サイドバーに自動更新スイッチを配置
 auto_refresh = st.sidebar.toggle("⏱️ 1分おきに自動更新", value=False)
 
 if os.path.exists(WATCHLIST_FILE):
@@ -35,7 +35,9 @@ if os.path.exists(WATCHLIST_FILE):
     if watchlist:
         rows = [[item['name'], item['ticker']] + fetch_status(item['ticker']) for item in watchlist]
         df = pd.DataFrame(rows, columns=["銘柄名", "コード", "現在値", "RSI", "状況"])
-        st.dataframe(df.style.highlight_between(left=0, right=30, subset=['RSI'], color='#e1f5fe'), use_container_width=True)
+        st.dataframe(df.style.highlight_between(left=0, right=30, subset=['RSI'], color='#e1f5fe')
+                           .highlight_between(left=75, right=100, subset=['RSI'], color='#ffebee'), 
+                     use_container_width=True)
 
 st.divider()
 
@@ -62,6 +64,7 @@ if os.path.exists(PRE_SCAN_FILE):
             json.dump(selected, f, ensure_ascii=False, indent=2)
         st.success("リストを更新しました！")
 
+# ✅ 自動更新の実行
 if auto_refresh:
     time.sleep(60)
     st.rerun()
