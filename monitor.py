@@ -23,6 +23,7 @@ def send_discord(msg):
 
 # --- 📈 テクニカル計算 ---
 def calculate_rsi(series, period=14):
+    if len(series) < period: return pd.Series([np.nan] * len(series))
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
@@ -37,19 +38,28 @@ def calculate_rci(series, period=9):
 # --- 📡 1. 高速日足全件スキャン ---
 def run_full_daily_scan():
     print("🚀 全件スキャンを開始します...")
-    send_discord("🔍 **【Jack株AI】プライム市場全件スキャンを開始します...**")
+    send_discord("🔍 **【Jack株AI】全件スキャンを開始します（JPXデータ取得中）...**")
+    
+    name_map = {}
     try:
-        res = requests.get(JPX_LIST_URL)
-        # 💡 FutureWarning対策：BytesIOでラップ
+        res = requests.get(JPX_LIST_URL, timeout=20)
         df = pd.read_excel(io.BytesIO(res.content))
-        prime_df = df[df['市場・商品区分'].str.contains('プライム', na=False)]
+        # 「プライム」または「Prime」を含む行を抽出
+        prime_df = df[df['市場・商品区分'].str.contains('プライム|Prime', na=False)]
         name_map = {f"{int(row['コード'])}.T": row['銘柄名'] for _, row in prime_df.iterrows()}
-        tickers = list(name_map.keys())
     except Exception as e:
-        send_discord(f"❌ 銘柄リスト取得失敗: {e}"); return
+        send_discord(f"⚠️ JPXリスト取得に失敗しました。主要銘柄で代替します。({e})")
+        # バックアップ用リスト
+        name_map = {"7203.T":"トヨタ", "9432.T":"NTT", "9984.T":"ソフトバンクG", "6758.T":"ソニーG", "8306.T":"三菱UFJ"}
 
+    tickers = list(name_map.keys())
     hits = {}
-    chunk_size = 100
+    chunk_size = 50 # 確実性を高めるため50件ずつ
+    
+    if not tickers:
+        send_discord("❌ スキャン対象の銘柄が見つかりませんでした。")
+        return
+
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i : i + chunk_size]
         try:
@@ -57,31 +67,30 @@ def run_full_daily_scan():
             for t in batch:
                 if t not in data or data[t].isnull().all(): continue
                 c = data[t].dropna()
-                if len(c) < 20: continue
-                rsi = calculate_rsi(c, 14).iloc[-1]; rci = calculate_rci(c, 9).iloc[-1]
-                if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
-                    status = "📉 底圏" if rsi <= 20 else "📈 天井"
-                    hits[t] = {"name": name_map[t], "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"}
-        except: continue
+                if len(c) < 15: continue
+                
+                rsi = calculate_rsi(c, 14).iloc[-1]
+                rci = calculate_rci(c, 9).iloc[-1]
+                
+                # RSI 20以下 または 90以上（RCIとの複合判定）
+                if (not np.isnan(rsi)) and (not np.isnan(rci)):
+                    if (rsi <= 20 and rci <= -70) or (rsi >= 90 and rci >= 95):
+                        status = "📉 底圏" if rsi <= 20 else "📈 天井"
+                        hits[t] = {"name": name_map[t], "reason": f"{status}(RSI:{rsi:.0f}/RCI:{rci:.0f})"}
+        except Exception as e:
+            print(f"Batch Error: {e}")
         time.sleep(1)
-        if i % 500 == 0: print(f"📊 スキャン中... {i}/{len(tickers)}")
 
-    # 結果を保存
+    # ✅ 成果物を必ず保存する
+    result_data = {"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}
     with open(PRE_SCAN_FILE, 'w', encoding='utf-8') as f:
-        json.dump({"date": get_jst_now().strftime('%Y-%m-%d'), "hits": hits}, f, ensure_ascii=False)
-    send_discord(f"✨ **【スキャン完了】** お宝候補は **{len(hits)}件** です。Streamlitを確認してください。")
+        json.dump(result_data, f, ensure_ascii=False, indent=2)
+    
+    send_discord(f"✨ **【スキャン完了】** お宝候補は **{len(hits)}件** です。Streamlitを更新してください。")
 
 if __name__ == "__main__":
     now_jst = get_jst_now()
     now_t = now_jst.time()
-    today_str = now_jst.strftime('%Y-%m-%d')
     
-    # 既存のファイル日付を確認
-    last_date = ""
-    if os.path.exists(PRE_SCAN_FILE):
-        with open(PRE_SCAN_FILE, 'r', encoding='utf-8') as f:
-            last_date = json.load(f).get('date', "")
-
-    # ✅ 修正：日付が今日でなければ、時間に関係なくスキャンを実行する！
-    if (last_date != today_str) or (dt_time(8, 45) <= now_t <= dt_time(9, 30)):
-        run_full_daily_scan()
+    # 常に最新を取りたいので、ファイルがあっても日付が違えば実行
+    run_full_daily_scan()
