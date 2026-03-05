@@ -1,8 +1,9 @@
-name: Jack_Stock_AI_Scan
+name: Jack_Scheduled_Scan
 on:
   schedule:
-    - cron: '15 07 * * *' # 日本時間 16:15
-  workflow_dispatch: # Actionsタブから手動実行可能にするボタン
+    - cron: '00 04 * * *' # 日本時間 13:00
+    - cron: '00 07 * * *' # 日本時間 16:00
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,7 +15,6 @@ jobs:
         with:
           python-version: '3.9'
       - name: Install dependencies
-        run: |
-          pip install yfinance pandas pandas_ta google-generativeai discord-webhook
+        run: pip install yfinance pandas pandas_ta google-generativeai discord-webhook numpy openpyxl
       - name: Run Scan
         run: python main.py
