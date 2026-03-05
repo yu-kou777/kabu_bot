@@ -1,31 +1,20 @@
-name: Stock Monitor Loop
+name: Jack_Stock_AI_Scan
 on:
   schedule:
-    - cron: '45 23 * * 0-4' # 08:45開始
-    - cron: '*/5 0-6 * * 1-5' # 5分おき監視
-  workflow_dispatch:
+    - cron: '15 07 * * *' # 日本時間 16:15
+  workflow_dispatch: # Actionsタブから手動実行可能にするボタン
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
       - name: Install dependencies
-        run: pip install yfinance==0.2.54 pandas requests numpy xlrd
-      - name: Run Monitor
-        run: python monitor.py
-      - name: Commit and Push
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add .
-          git commit -m "Auto-update: 600-batch scan results" || exit 0
-          git pull --rebase origin main
-          git push origin main
+          pip install yfinance pandas pandas_ta google-generativeai discord-webhook
+      - name: Run Scan
+        run: python main.py
