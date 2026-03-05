@@ -7,7 +7,7 @@ from discord_webhook import DiscordWebhook
 import datetime
 
 # --- 初期設定 ---
-GENAI_API_KEY = "YOUR_GEMINI_API_KEY"
+GENAI_API_KEY = "gen-lang-client-0447054408"
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 genai.configure(api_key=GENAI_API_KEY)
