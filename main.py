@@ -16,7 +16,6 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epG
 genai.configure(api_key=GENAI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# 銘柄リスト（和名）
 TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -28,7 +27,6 @@ TICKER_MAP = {
     "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
-# --- RCI計算 ---
 def calculate_rci(series, period=9):
     if len(series) < period: return np.zeros(len(series))
     rci = np.zeros(len(series))
@@ -40,7 +38,20 @@ def calculate_rci(series, period=9):
         rci[i] = (1 - (6 * diff_sq_sum) / (period * (period**2 - 1))) * 100
     return rci
 
-# --- スキャン処理 ---
+def get_ai_prediction_safe(symbol, name, last_price, rsi, rci):
+    """リトライ機能付きAI分析"""
+    prompt = f"銘柄:{name}, 価格:{last_price:.0f}円, RSI:{rsi:.1f}, RCI:{rci:.1f}。変動要因、上昇期待日、目標株価を3行で回答して。"
+    for attempt in range(3):
+        try:
+            # 無料枠のリミット(RPM)を考慮し、実行前にしっかり待つ
+            time.sleep(4) 
+            response = model.generate_content(prompt)
+            if response.text:
+                return response.text
+        except Exception:
+            time.sleep(15) # エラー時は長めに待機
+    return "⚠️AI分析リミット超過（後ほど再試行）"
+
 def run_full_scan():
     results = []
     summary_items = []
@@ -53,13 +64,10 @@ def run_full_scan():
             
             df['RSI'] = ta.rsi(df['Close'], length=14)
             df['RCI'] = calculate_rci(df['Close'], period=9)
-            
             last = df.iloc[-1]
-            # AI分析 (リミット回避のため1秒待機)
-            time.sleep(1)
-            prompt = f"銘柄:{name}, 価格:{last['Close']:.0f}円, RSI:{last['RSI']:.1f}, RCI:{last['RCI']:.1f}。変動要因、上昇期待日、目標株価を3行で回答して。"
-            response = model.generate_content(prompt)
-            ai_text = response.text
+            
+            # AI分析（安全版）
+            ai_text = get_ai_prediction_safe(symbol, name, last['Close'], last['RSI'], last['RCI'])
             
             data = {
                 "銘柄名": name, "コード": symbol, "株価": f"{last['Close']:,.0f}円",
@@ -70,14 +78,11 @@ def run_full_scan():
         except:
             continue
     
-    # Discord送信 (まとめ)
     if summary_items:
-        full_msg = "📢 **【Jack株AI 定刻スキャン報告】**\n\n" + "\n\n".join(summary_items)
-        # Discordの文字数制限(2000字)対策
+        full_msg = f"📢 **【Jack株AI 定刻スキャン報告】** ({datetime.now().strftime('%H:%M')})\n\n" + "\n\n".join(summary_items)
         for i in range(0, len(full_msg), 1900):
             DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=full_msg[i:i+1900]).execute()
             
-    # CSV保存
     pd.DataFrame(results).to_csv("last_scan_result.csv", index=False)
     return results
 
@@ -85,14 +90,13 @@ def run_full_scan():
 st.title("🏆 Jack株AI：最終兵器ボード")
 
 if st.button("🚀 今すぐ最新スキャンを実行"):
-    with st.spinner("プライム市場をAI精査中..."):
+    with st.spinner("1銘柄ずつ丁寧にAI精査中... (約2〜3分かかります)"):
         run_full_scan()
     st.rerun()
 
-# 結果表示
 if os.path.exists("last_scan_result.csv"):
     df_history = pd.read_csv("last_scan_result.csv")
-    st.subheader(f"📊 最新のスキャン結果 ({datetime.now().strftime('%m/%d %H:%M')})")
+    st.subheader(f"📊 最新のスキャン結果")
     st.dataframe(df_history, use_container_width=True)
 else:
-    st.info("まだスキャンデータがありません。「実行ボタン」を押すか、定刻(13:00/16:00)の自動実行を待ってください。")
+    st.info("スキャンデータがありません。ボタンを押して開始してください。")
