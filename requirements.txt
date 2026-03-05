@@ -5,4 +5,3 @@ pandas_ta
 google-generativeai
 discord-webhook
 numpy
-openpyxl
