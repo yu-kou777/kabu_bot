@@ -1,5 +1,5 @@
 yfinance>=0.2.50
 pandas
-google-genai
+requests
 discord-webhook
 numpy
