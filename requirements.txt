@@ -1,6 +1,6 @@
 yfinance
-pandas
+pandas<2.1.0
 pandas-ta
 google-generativeai
 discord-webhook
-numpy
+numpy<2.0.0
