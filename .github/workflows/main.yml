@@ -9,18 +9,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4 # 最新版
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # v5にアップグレード
         with:
           python-version: '3.11'
-          cache: 'pip' # これで次回から爆速になります
+          cache: 'pip' # これが爆速の鍵です
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # バージョンを固定してインストール時間の肥大化を防ぎます
-          pip install "yfinance>=0.2.40" "pandas<2.2.0" "numpy<2.0.0" "google-genai" "discord-webhook" "streamlit"
+          pip install yfinance pandas google-genai discord-webhook numpy streamlit
 
       - name: Run Scan
         run: python main.py
