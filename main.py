@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from google import genai
+import google.generativeai as genai
 from discord_webhook import DiscordWebhook
 import time
 import numpy as np
@@ -10,6 +10,9 @@ import os
 # --- 設定（合鍵を直接セット） ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
+
+# AIの初期化
+genai.configure(api_key=GEMINI_KEY)
 
 # 監視対象：主力24銘柄
 TICKERS = {
@@ -49,7 +52,6 @@ def calculate_rci(series, period=9):
 # --- メイン実行エンジン ---
 def main():
     print("🚀 ジャック株AI：戦闘開始...")
-    client = genai.Client(api_key=GEMINI_KEY)
     summary_text = ""
     
     for symbol, name in TICKERS.items():
@@ -64,29 +66,32 @@ def main():
             
             # ジャックさん専用・超絶判定
             alert = ""
-            if rsi < 21 and rci < -79: alert = "🔥【超絶売られすぎ】"
-            elif rsi > 89 and rci > 94: alert = "⚠️【超過熱・警戒】"
+            if rsi < 21 and rci < -79:
+                alert = "🔥【超絶売られすぎ】"
+            elif rsi > 89 and rci > 94:
+                alert = "⚠️【超過熱・警戒】"
             
             summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}, 価格:{price}円\n"
-            print(f"✅ {name}: RSI:{rsi} / RCI:{rci}")
+            print(f"✅ {name}: RSI:{rsi} / RCI:{rci} {alert}")
         except Exception as e:
             print(f"❌ {symbol} エラー: {e}")
 
     print("🤖 AIが攻略本を執筆中...")
-    prompt = f"日本株の凄腕プロとして以下を分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_text}"
+    # 安定版の呼び出し方式に変更
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で回答せよ。\n\n{summary_text}"
     
     try:
-        # 404エラーを物理的に封印する正確なSDK呼び出し
-        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        response = model.generate_content(prompt)
         ai_analysis = response.text
     except Exception as e:
-        ai_analysis = f"AI分析失敗（404対策中）: {str(e)}"
+        ai_analysis = f"AI分析失敗: {str(e)}"
 
-    # Discordへ一気に報告
+    # Discord報告
     now = datetime.now().strftime('%m/%d %H:%M')
     msg = f"📢 **【Jack株AI 定刻報告】** ({now})\n\n{ai_analysis}"
     
-    # 2000文字制限対策
+    # 分割送信
     for i in range(0, len(msg), 1900):
         DiscordWebhook(url=DISCORD_URL, content=msg[i:i+1900]).execute()
     
