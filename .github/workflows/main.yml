@@ -17,6 +17,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas google-generativeai discord-webhook numpy
+          pip install yfinance pandas google-generativeai discord-webhook numpy streamlit
       - name: Run Scan
         run: python main.py
