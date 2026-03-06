@@ -3,7 +3,7 @@ on:
   schedule:
     - cron: '00 04 * * *' # 日本時間 13:00
     - cron: '00 07 * * *' # 日本時間 16:00
-  workflow_dispatch:      # 手動実行ボタンを表示
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas google-genai discord-webhook numpy streamlit
+          pip install -r requirements.txt
 
       - name: Run Scan
         run: python main.py
