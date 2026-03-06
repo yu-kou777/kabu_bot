@@ -51,22 +51,44 @@ def main():
         try:
             stock = yf.Ticker(symbol)
             df = stock.history(period="6mo")
-            if df.empty: continue
+            if df.empty or len(df) < 2: continue
             
+            # 当日と前日のデータを取得（反転シグナル判定のため）
             rsi = round(calculate_rsi(df['Close'], 14).iloc[-1], 1)
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
+            prev_rsi = round(calculate_rsi(df['Close'], 14).iloc[-2], 1)
+            prev_rci = round(calculate_rci(df['Close'], 9)[-2], 1)
             price = f"{df['Close'].iloc[-1]:,.0f}"
             
+            # --- ジャックさん専用：新規アラート条件判定 ---
             alert = ""
-            if rsi < 21 and rci < -79:
-                alert = "🔥【超絶売られすぎ】"
-            elif rsi > 89 and rci > 94:
-                alert = "⚠️【超過熱・警戒】"
+            
+            # 条件1: RSI10以下の翌日急騰または強い上昇トレンド
+            if rsi <= 10:
+                alert = "🚀【急騰期待】RSI10以下（強い上昇トレンド）"
+            # 条件2: RCI最低値+RSI20以下の売られすぎ -> 株価急騰・上昇トレンド
+            elif rci <= -95 and rsi <= 20:
+                alert = "🔥【大底急騰期待】RCI底値圏+RSI20以下"
+            # 条件3: RCI最高値+RSI80以上の買われすぎ -> 株価急落・下降トレンド
+            elif rci >= 95 and rsi >= 80:
+                alert = "⚠️【急落注意】RCI最高値圏+RSI80以上"
+            # 条件4: 「RSI30以下、RCI-50以下」の売られすぎ -> 買い推奨
+            elif rsi <= 30 and rci <= -50:
+                alert = "🟢【買い推奨】売られすぎ水準"
+            # 条件5: 「RSI90以上、RCI95以上」の買われすぎ -> 空売り推奨
+            elif rsi >= 90 and rci >= 95:
+                alert = "🔴【空売り推奨】買われすぎ水準"
+            # 条件6: 反転シグナル（売られすぎ圏でのデッドクロス＝反転上昇の意図と解釈）
+            # RSIかRCIが低い水準にあり、かつ前日より上向きに転じた場合
+            elif (rci <= -50 and prev_rci < rci) or (rsi <= 30 and prev_rsi < rsi):
+                alert = "⤴️【反転シグナル】売られすぎ圏からの上昇確認"
             else:
                 alert = "✅"
             
             line = f"{alert} {name}: RSI:{rsi} / RCI:{rci} ({price}円)\n"
+            # アラートが出た銘柄（✅以外）を目立たせるために上に持っていくなどの工夫も可能ですが、今回はそのまま追加
             data_msg += line
+            # AIにはアラート銘柄だけを分析させるよう絞り込むことも可能
             summary_for_ai += line
         except:
             pass
@@ -82,10 +104,10 @@ def main():
 
     # 3. 【第二陣】AIに裏方で攻略本を執筆させる
     print("🤖 AIが裏方で攻略本を執筆中...")
-    prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_for_ai}"
+    prompt = f"日本株プロとして分析。以下のデータから、シグナルが出ている銘柄（✅以外）を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_for_ai}"
     
     try:
-        # 404エラー対策：安定版の v1 エンドポイントを使用
+        # 💡 404エラー対策：古いv1betaから、安定した v1 エンドポイントへ変更
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -108,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
