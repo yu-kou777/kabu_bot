@@ -1,32 +1,15 @@
-import yfinance as yf
+import streamlit as st
 import pandas as pd
-import json
 import os
-import requests
-import time
-from datetime import datetime, timedelta, timezone
 
-DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
-WATCHLIST_FILE = "jack_watchlist.json"
+st.title("📂 Jack株AI：過去のスキャン履歴")
 
-def send_discord(msg):
-    requests.post(DISCORD_URL, json={"content": msg})
-
-def monitor_watchlist():
-    if not os.path.exists(WATCHLIST_FILE): return
-    with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
-        watchlist = json.load(f)
+if os.path.exists("scan_history.csv"):
+    df_history = pd.read_csv("scan_history.csv")
+    # 日付でソート（新しい順）
+    df_history = df_history.sort_values("date", ascending=False)
     
-    for item in watchlist:
-        t = item['ticker']
-        # 💡 GitHubからは少数の監視銘柄だけを取得
-        try:
-            data = yf.download(t, period="1d", interval="1m", progress=False)
-            # アルゴ判定ロジック...
-            # 判定がヒットしたらDiscordへ
-        except:
-            print(f"Skipping {t} due to error")
-        time.sleep(5) # 慎重に
-
-if __name__ == "__main__":
-    monitor_watchlist()
+    st.write(f"合計 {len(df_history)} 件のデータが見つかりました。")
+    st.dataframe(df_history, use_container_width=True)
+else:
+    st.info("まだ履歴データがありません。スキャンを実行してください。")
