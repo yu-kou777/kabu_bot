@@ -7,16 +7,18 @@ import numpy as np
 from datetime import datetime
 import os
 
-# --- 設定 ---
+# --- 設定（GitHubの環境変数から読み込み） ---
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# 安全装置：URLがない場合はログに出す
-if not DISCORD_WEBHOOK_URL:
-    print("⚠️ Discord Webhook URLが設定されていません。環境変数を確認してください。")
+# APIクライアントの初期化
+if not GENAI_API_KEY:
+    print("❌ エラー: GEMINI_API_KEY が設定されていません。")
+    exit()
 
 client = genai.Client(api_key=GENAI_API_KEY)
 
+# 監視銘柄（主力24銘柄）
 TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -28,6 +30,7 @@ TICKER_MAP = {
     "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
+# --- テクニカル計算（ジャックさん専用ロジック） ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -47,11 +50,13 @@ def calculate_rci(series, period=9):
     return rci
 
 def run_full_scan():
-    print("🚀 ジャック株AI：スキャン開始...")
+    print("🚀 スキャン開始（Jack株AI 安定稼働版）...")
     scan_details = ""
+    hit_count = 0
     
     for symbol, name in TICKER_MAP.items():
         try:
+            print(f"📡 データ取得中: {name}({symbol})")
             stock = yf.Ticker(symbol)
             df = stock.history(period="6mo")
             if df.empty: continue
@@ -60,32 +65,51 @@ def run_full_scan():
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
             price = f"{df['Close'].iloc[-1]:,.0f}"
             
-            # ジャックさん専用：超絶アラート判定（RSI<21 ＆ RCI<-79）
+            # --- 緊急アラート判定（ジャックさん指定条件） ---
             alert = ""
             if rsi < 21 and rci < -79:
                 alert = "🔥【超絶売られすぎ】"
             elif rsi > 89 and rci > 94:
                 alert = "⚠️【超過熱・警戒】"
             
+            print(f"  -> RSI:{rsi} / RCI:{rci} {alert}")
             scan_details += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}, 価格:{price}円\n"
+            hit_count += 1
         except: continue
 
-    print("🤖 AI分析中...")
-    prompt = f"凄腕トレーダーとして以下を分析。変動要因、上昇期待日、目標株価を銘柄ごとに3行で回答せよ。\n\n{scan_details}"
+    if not scan_details:
+        print("❌ 解析対象のデータがありませんでした。")
+        return
+
+    # 🤖 AI一括分析
+    print("🤖 AIが攻略本を執筆中...")
+    prompt = f"""
+    あなたは凄腕のテクニカルトレーダーです。以下の日本株データ（特にアラート銘柄）を分析し、
+    変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に回答してください。
+    【分析対象】
+    {scan_details}
+    """
+    
     try:
+        # リミット回避のため15秒待機
         time.sleep(15)
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         ai_analysis = response.text
     except Exception as e:
         ai_analysis = f"AI分析失敗: {str(e)}"
 
+    # 📢 Discord送信（修正ポイント）
     if DISCORD_WEBHOOK_URL:
         now_str = datetime.now().strftime('%m/%d %H:%M')
         msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
-        for i in range(0, len(msg), 1900):
-            DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
-    
-    print("✅ 全工程完了")
+        try:
+            for i in range(0, len(msg), 1900):
+                DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
+            print("✅ Discordへの送信が成功しました。")
+        except Exception as e:
+            print(f"❌ Discord送信エラー: {e}")
+    else:
+        print("⚠️ DISCORD_WEBHOOK_URL が設定されていないため、送信をスキップしました。")
 
 if __name__ == "__main__":
     run_full_scan()
