@@ -41,8 +41,12 @@ def calculate_rci(series, period=9):
 
 def main():
     print("🚀 ジャック株AI：戦闘開始...")
-    summary_text = ""
     
+    now_str = datetime.now().strftime('%m/%d %H:%M')
+    data_msg = f"📊 **【Jack株AI テクニカル速報】** ({now_str})\n\n"
+    summary_for_ai = ""
+    
+    # 1. データ収集と計算
     for symbol, name in TICKERS.items():
         try:
             stock = yf.Ticker(symbol)
@@ -58,42 +62,49 @@ def main():
                 alert = "🔥【超絶売られすぎ】"
             elif rsi > 89 and rci > 94:
                 alert = "⚠️【超過熱・警戒】"
+            else:
+                alert = "✅"
             
-            summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}, 価格:{price}円\n"
+            line = f"{alert} {name}: RSI:{rsi} / RCI:{rci} ({price}円)\n"
+            data_msg += line
+            summary_for_ai += line
         except:
             pass
 
-    print("🤖 AIが攻略本を執筆中...")
-    prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_text}"
-    
-    # SDKを使わず、直接通信で404エラーを回避
+    # 2. 【第一陣】テクニカルデータだけを確実にDiscordへ送信
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        for i in range(0, len(data_msg), 1900):
+            DiscordWebhook(url=DISCORD_URL, content=data_msg[i:i+1900]).execute()
+            time.sleep(1)
+        print("✅ 第一陣：テクニカル速報の送信完了！")
+    except Exception as e:
+        print(f"❌ 速報の送信に失敗: {e}")
+
+    # 3. 【第二陣】AIに裏方で攻略本を執筆させる
+    print("🤖 AIが裏方で攻略本を執筆中...")
+    prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_for_ai}"
+    
+    try:
+        # 404エラー対策：安定版の v1 エンドポイントを使用
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {"contents": [{"parts": [{"text": prompt}]}]}
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
             ai_analysis = response.json()['candidates'][0]['content']['parts'][0]['text']
+            ai_msg = f"🤖 **【AI攻略本】**\n\n{ai_analysis}"
+            
+            # 成功した場合のみ追撃で送信
+            for i in range(0, len(ai_msg), 1900):
+                DiscordWebhook(url=DISCORD_URL, content=ai_msg[i:i+1900]).execute()
+                time.sleep(1)
+            print("✅ 第二陣：AI攻略本の送信完了！")
         else:
-            ai_analysis = f"AI分析失敗: {response.status_code} - {response.text}"
+            # エラーの場合はDiscordに送らず、ログだけで黙って終了
+            print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code})")
     except Exception as e:
-        ai_analysis = f"通信エラー: {str(e)}"
-
-    now_str = datetime.now().strftime('%m/%d %H:%M')
-    msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
-    
-    chunk_size = 1800 
-    chunks = [msg[i:i+chunk_size] for i in range(0, len(msg), chunk_size)]
-    
-    for chunk in chunks:
-        try:
-            DiscordWebhook(url=DISCORD_URL, content=chunk).execute()
-        except:
-            pass
-        time.sleep(1) 
-    
-    print("✅ 全工程が完了しました。")
+        print(f"⚠️ AI通信エラーのため裏方で処理を終了します。")
 
 if __name__ == "__main__":
     main()
