@@ -19,8 +19,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # ここから streamlit を削除して軽量化しました
           pip install yfinance pandas google-genai discord-webhook numpy
 
       - name: Run Scan
+        # ここで秘密の鍵(Secrets)をプログラムに渡します
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
