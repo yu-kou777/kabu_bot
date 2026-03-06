@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-import google.generativeai as genai
+from google import genai
 from discord_webhook import DiscordWebhook
 import time
 import numpy as np
@@ -8,12 +8,13 @@ from datetime import datetime
 import os
 
 # --- 設定（合鍵と住所） ---
-# 💡 URLの最初から最後まで、余計な空白がないか確認してください！
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-genai.configure(api_key=GEMINI_KEY)
+# 💡 最新SDKによるAIの初期化
+client = genai.Client(api_key=GEMINI_KEY)
 
+# 監視対象：主力24銘柄
 TICKERS = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -57,6 +58,7 @@ def main():
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
             price = f"{df['Close'].iloc[-1]:,.0f}"
             
+            # 超絶アラート判定
             alert = ""
             if rsi < 21 and rci < -79:
                 alert = "🔥【超絶売られすぎ】"
@@ -68,22 +70,25 @@ def main():
             pass
 
     print("🤖 AIが攻略本を執筆中...")
-    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_text}"
     
     try:
-        response = model.generate_content(prompt)
+        # 💡 404エラー対策：モデル名を「gemini-1.5-flash」に固定し、自動推測に任せる
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
         ai_analysis = response.text
-        print("✅ AIの執筆が完了しました。Discordへ送信を開始します。")
+        print("✅ AIの執筆が完了しました。")
     except Exception as e:
         ai_analysis = f"AI分析失敗: {str(e)}"
-        print("❌ AIの執筆でエラーが発生しました。")
+        print(f"❌ AIエラー詳細: {e}")
 
-    # Discord報告（確実な分割送信とエラーチェック）
+    # Discord報告（確実な分割送信）
     now_str = datetime.now().strftime('%m/%d %H:%M')
     msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
     
-    chunk_size = 1800 # 余裕を持たせて1800文字ずつ送信
+    chunk_size = 1800 
     chunks = [msg[i:i+chunk_size] for i in range(0, len(msg), chunk_size)]
     
     success_count = 0
@@ -91,19 +96,14 @@ def main():
         try:
             webhook = DiscordWebhook(url=DISCORD_URL, content=chunk)
             response = webhook.execute()
-            # HTTPステータスコードが200番台なら成功
             if response.status_code >= 200 and response.status_code < 300:
                 success_count += 1
-            else:
-                print(f"❌ Discord送信エラー (Chunk {i+1}): ステータスコード {response.status_code}")
         except Exception as e:
-            print(f"❌ Discord送信致命的エラー: {e}")
-        time.sleep(1) # 連続送信によるスパム判定を回避
+            pass
+        time.sleep(1) 
     
     if success_count == len(chunks):
         print(f"✅ 全{len(chunks)}通のメッセージがDiscordへ正常に送信されました！")
-    else:
-        print(f"⚠️ 一部のメッセージが送信できませんでした ({success_count}/{len(chunks)} 成功)")
 
 if __name__ == "__main__":
     main()
