@@ -13,8 +13,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11' # バージョンを上げて安定させます
       - name: Install dependencies
-        run: pip install yfinance pandas pandas_ta google-generativeai discord-webhook numpy openpyxl
+        run: |
+          pip install --upgrade pip
+          pip install yfinance pandas pandas-ta google-generativeai discord-webhook numpy
       - name: Run Scan
         run: python main.py
