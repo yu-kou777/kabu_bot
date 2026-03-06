@@ -1,6 +1,8 @@
-streamlit
 yfinance
 pandas
-google-generativeai
+google-genai
 discord-webhook
 numpy
+gspread
+google-auth
+streamlit
