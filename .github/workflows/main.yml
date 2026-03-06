@@ -24,5 +24,4 @@ jobs:
       - name: Run Scan
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GSPREAD_SERVICE_ACCOUNT: ${{ secrets.GSPREAD_SERVICE_ACCOUNT }}
         run: python main.py
