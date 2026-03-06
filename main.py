@@ -1,3 +1,4 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 from google import genai
@@ -8,17 +9,11 @@ from datetime import datetime
 import os
 
 # --- 設定 ---
-# GitHub Secretsの GEMINI_API_KEY を使用
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-if not GENAI_API_KEY:
-    print("❌ APIキーが見つかりません。")
-    exit()
-
 client = genai.Client(api_key=GENAI_API_KEY)
 
-# 監視対象（ジャックさんの主力24銘柄）
 TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -30,7 +25,7 @@ TICKER_MAP = {
     "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
-# --- テクニカル計算 (ジャックさんの要望に基づき実施) ---
+# --- テクニカル計算 ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -50,10 +45,9 @@ def calculate_rci(series, period=9):
     return rci
 
 def run_full_scan():
-    print("🚀 スキャン開始...")
-    stock_summary = ""
+    all_data = []
+    summary_text = ""
     
-    # 全銘柄のデータを一括で準備
     for symbol, name in TICKER_MAP.items():
         try:
             stock = yf.Ticker(symbol)
@@ -64,42 +58,45 @@ def run_full_scan():
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
             price = f"{df['Close'].iloc[-1]:,.0f}"
             
-            # ジャックさん指定の緊急アラート判定
+            # ジャックさん専用アラート
             alert = ""
-            if rsi < 21 and rci < -79:
-                alert = "🔥【超絶売られすぎ・反発期待】"
-            elif rsi > 89 and rci > 94:
-                alert = "⚠️【超過熱・高値警戒】"
+            if rsi < 21 and rci < -79: alert = "🔥【超絶売られすぎ】"
+            elif rsi > 89 and rci > 94: alert = "⚠️【超過熱・警戒】"
             
-            stock_summary += f"{alert}{name}({symbol}): 現値{price}円, RSI:{rsi}, RCI:{rci}\n"
+            all_data.append({"銘柄名": name, "コード": symbol, "現値": price, "RSI": rsi, "RCI": rci, "判定": alert})
+            summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}\n"
         except: continue
 
-    # 🤖 AIへ一括で依頼（リクエスト回数を1回に絞ることで無料枠エラーを完全に回避）
-    prompt = f"""
-    あなたは凄腕の日本株トレーダーです。以下の銘柄データから、
-    特にアラート(🔥や⚠️)が出ているものを重点的に、今後の「変動要因」「上昇期待日」「目標株価」を
-    銘柄ごとに3行で簡潔に、専門的に分析してください。
-    
-    【対象データ】
-    {stock_summary}
-    """
-    
+    # 🤖 AI一括分析（無料枠制限の回避）
+    prompt = f"以下の日本株テクニカルデータから今後の「変動要因」「上昇期待日」「目標株価」を簡潔に分析してください。\n\n{summary_text}"
     try:
-        # モデル名は安定の gemini-1.5-flash
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
-        final_analysis = response.text
-    except Exception as e:
-        final_analysis = f"AI分析失敗: {str(e)}"
+        ai_analysis = response.text
+    except:
+        ai_analysis = "AI分析リミット制限中"
 
-    # 📢 Discordへ一括送信
+    # Discord送信
     now_str = datetime.now().strftime('%m/%d %H:%M')
-    msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{final_analysis}"
-    
-    # 2000文字を超える場合は分割して送信
+    msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
     for i in range(0, len(msg), 1900):
         DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
     
-    print("✅ 全銘柄の分析が完了しました。")
+    return all_data, ai_analysis
 
-if __name__ == "__main__":
+# --- Streamlit 表示ロジック ---
+if st.runtime.exists():
+    st.title("🏆 Jack株AI：最終兵器ダッシュボード")
+    
+    if st.button("🚀 最新スキャン ＆ 攻略本作成を開始"):
+        with st.spinner("AIが全銘柄を精査中..."):
+            data, analysis = run_full_scan()
+            st.success("スキャン完了！ Discordに通知しました。")
+            
+            st.subheader("📊 テクニカル分析一覧")
+            st.table(pd.DataFrame(data))
+            
+            st.subheader("🤖 AI分析結果")
+            st.write(analysis)
+else:
+    # GitHub Actions等の背景実行時は直接スキャン
     run_full_scan()
