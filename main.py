@@ -6,15 +6,14 @@ import time
 import numpy as np
 from datetime import datetime
 import os
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- 設定 ---
-# GitHub Secretsから安全に読み込みます
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
-
-if not GENAI_API_KEY:
-    print("❌ APIキーが見つかりません。GitHubのSecretsを確認してください。")
-    exit()
+SHEET_JSON = os.environ.get("GSPREAD_SERVICE_ACCOUNT")
 
 client = genai.Client(api_key=GENAI_API_KEY)
 
@@ -22,10 +21,13 @@ TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
     "6146.T": "ディスコ", "4063.T": "信越化学", "8058.T": "三菱商事",
-    "8316.T": "三井住友FG", "9101.T": "日本郵船", "7011.T": "三菱重工"
+    "8316.T": "三井住友FG", "9101.T": "日本郵船", "7011.T": "三菱重工",
+    "4502.T": "武田薬品", "6501.T": "日立製作所", "6702.T": "富士通",
+    "6201.T": "豊田自動織機", "9104.T": "商船三井", "6367.T": "ダイキン工業",
+    "6273.T": "SMC", "7974.T": "任天堂", "9020.T": "JR東日本",
+    "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
-# --- テクニカル計算 (ジャックさんの要望に基づき実施) ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -44,33 +46,9 @@ def calculate_rci(series, period=9):
         rci[i] = (1 - (6 * diff_sq_sum) / (period * (period**2 - 1))) * 100
     return rci
 
-# --- AI一括分析 ---
-def get_batch_ai_analysis(stock_data_list):
-    input_text = ""
-    for d in stock_data_list:
-        alert = ""
-        # ジャックさん専用判定：超絶売られすぎ(RSI<21, RCI<-79) / 超過熱(RSI>89, RCI>94)
-        if d['rsi'] < 21 and d['rci'] < -79:
-            alert = "🔥【超絶売られすぎ・反発期待】\n"
-        elif d['rsi'] > 89 and d['rci'] > 94:
-            alert = "⚠️【超過熱・高値警戒】\n"
-        
-        input_text += f"{alert}{d['name']}({d['symbol']}): 価格{d['price']}円, RSI{d['rsi']}, RCI{d['rci']}\n"
-    
-    # テクニカル分析を重視したプロンプト
-    prompt = f"以下の日本株について、テクニカル視点から変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析してください。\n\n{input_text}"
-    
-    try:
-        time.sleep(30) # 429エラー回避のため長めに待機
-        # 修正：モデル名を正確に指定
-        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
-        return response.text if response.text else "分析失敗"
-    except Exception as e:
-        return f"AIエラー: {str(e)}"
-
 def run_full_scan():
     print("🚀 スキャン開始...")
-    all_stock_data = []
+    all_data = []
     
     for symbol, name in TICKER_MAP.items():
         try:
@@ -78,26 +56,44 @@ def run_full_scan():
             df = stock.history(period="6mo")
             if df.empty: continue
             
-            rsi = calculate_rsi(df['Close'], 14).iloc[-1]
-            rci = calculate_rci(df['Close'], 9)[-1]
+            rsi = round(calculate_rsi(df['Close'], 14).iloc[-1], 1)
+            rci = round(calculate_rci(df['Close'], 9)[-1], 1)
+            price = f"{df['Close'].iloc[-1]:,.0f}"
             
-            all_stock_data.append({
-                "symbol": symbol, "name": name, 
-                "price": f"{df['Close'].iloc[-1]:,.0f}",
-                "rsi": round(rsi, 1), "rci": round(rci, 1)
-            })
+            # アラート判定
+            alert = ""
+            if rsi < 21 and rci < -79: alert = "🔥【超絶売られすぎ】"
+            elif rsi > 89 and rci > 94: alert = "⚠️【超過熱・高値警戒】"
+            
+            all_data.append({"symbol": symbol, "name": name, "price": price, "rsi": rsi, "rci": rci, "alert": alert})
         except: continue
 
-    final_report = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
-    batch_size = 5
-    for i in range(0, len(all_stock_data), batch_size):
-        batch = all_stock_data[i:i + batch_size]
-        analysis_result = get_batch_ai_analysis(batch)
-        final_report += analysis_result + "\n\n---\n\n"
+    # 🤖 AIへ一括で依頼（リミット回避）
+    prompt = "以下の日本株のテクニカルデータ（特にアラート銘柄）を分析し、変動要因、上昇期待日、目標株価を銘柄ごとに簡潔に3行で回答してください。\n\n"
+    for d in all_data:
+        prompt += f"{d['alert']}{d['name']}({d['symbol']}): 価格{d['price']}円, RSI:{d['rsi']}, RCI:{d['rci']}\n"
+    
+    try:
+        # モデル名は 'gemini-1.5-flash' で指定
+        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        full_analysis = response.text
+    except Exception as e:
+        full_analysis = f"AI分析失敗: {str(e)}"
 
-    for j in range(0, len(final_report), 1900):
-        DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=final_report[j:j+1900]).execute()
-    print("✅ 全工程完了")
+    # 📢 Discord送信
+    now_str = datetime.now().strftime('%m/%d %H:%M')
+    msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{full_analysis}"
+    for i in range(0, len(msg), 1900):
+        DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
+
+    # 📊 スプレッドシート保存
+    if SHEET_JSON:
+        try:
+            creds = Credentials.from_service_account_info(json.loads(SHEET_JSON), scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
+            sh = gspread.authorize(creds).open("Jack_Stock_History").sheet1
+            for d in all_data:
+                sh.append_row([now_str, d['symbol'], d['name'], d['price'], d['rsi'], d['rci'], full_analysis[:500]])
+        except Exception as e: print(f"Sheet Error: {e}")
 
 if __name__ == "__main__":
     run_full_scan()
