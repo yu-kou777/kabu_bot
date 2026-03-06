@@ -19,9 +19,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install yfinance pandas google-genai discord-webhook numpy streamlit
 
       - name: Run Scan
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 💡 ここが今回のエラー修正のポイントです！
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
