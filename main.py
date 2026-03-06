@@ -12,27 +12,30 @@ GENAI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 if not GENAI_API_KEY:
-    print("❌ APIキーが読み込めていません。GitHubのSettings > Secretsを確認してください。")
+    print("❌ APIキーが読み込めていません。")
     exit()
 
 client = genai.Client(api_key=GENAI_API_KEY)
 
-# 🏆 プライム市場 厳選100銘柄リスト（和名対応）
-TICKER_MAP = {
-    "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG", "7203.T": "トヨタ自動車",
-    "6920.T": "レーザーテック", "6857.T": "アドバンテスト", "6146.T": "ディスコ", "4063.T": "信越化学",
-    "8058.T": "三菱商事", "8316.T": "三井住友FG", "9101.T": "日本郵船", "7011.T": "三菱重工",
-    "4502.T": "武田薬品", "6501.T": "日立製作所", "6702.T": "富士通", "6201.T": "豊田自動織機",
-    "9104.T": "商船三井", "6367.T": "ダイキン工業", "6273.T": "SMC", "7974.T": "任天堂",
-    "9020.T": "JR東日本", "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス",
-    "4503.T": "アステラス薬", "6098.T": "リクルート", "6902.T": "デンソー", "6981.T": "村田製作所",
-    "7741.T": "ＨＯＹＡ", "8001.T": "伊藤忠", "8031.T": "三井物産", "8306.T": "三菱ＵＦＪ",
-    "8411.T": "みずほＦＧ", "8766.T": "東京海上", "8801.T": "三井不動産", "8802.T": "三菱地所",
-    "9432.T": "ＮＴＴ", "9433.T": "ＫＤＤＩ", "9983.T": "ファーストリテイ", "4901.T": "富士フイルム",
-    "5108.T": "ブリヂストン", "6301.T": "小松製作所", "6503.T": "三菱電機", "7751.T": "キヤノン",
-    # 銘柄は順次追加可能
-}
+# --- 1. 銘柄自動取得リストの作成 ---
+def get_prime_ticker_list():
+    """JPXの公式サイトからプライム市場の全銘柄リストを取得・抽出する"""
+    print("📡 JPXからプライム銘柄リストを自動取得中...")
+    try:
+        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+        df_jpx = pd.read_excel(url)
+        # 市場区分が「プライム」の銘柄のみ抽出
+        prime_df = df_jpx[df_jpx["市場・商品区分"] == "プライム（内国株式）"]
+        # コードを yfinance 形式 (例: 8035.T) に変換
+        ticker_list = [f"{code}.T" for code in prime_df["コード"]]
+        # 銘柄名とのマップを作成
+        ticker_map = dict(zip(ticker_list, prime_df["銘柄名"]))
+        return ticker_map
+    except Exception as e:
+        print(f"⚠️ リスト取得失敗。固定リストを使用します: {e}")
+        return {"8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG"}
 
+# --- 2. テクニカル計算 (ジャックさん専用ロジック) ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -41,10 +44,6 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_rci(series, period=9):
-    """
-    RCIの計算公式:
-    $$RCI = (1 - \\frac{6 \sum d^2}{n(n^2 - 1)}) \times 100$$
-    """
     if len(series) < period: return np.zeros(len(series))
     rci = np.zeros(len(series))
     for i in range(period - 1, len(series)):
@@ -55,66 +54,72 @@ def calculate_rci(series, period=9):
         rci[i] = (1 - (6 * diff_sq_sum) / (period * (period**2 - 1))) * 100
     return rci
 
+# --- 3. AI一括分析 ---
 def get_batch_ai_analysis(stock_data_list):
-    input_text = "\n".join([f"{d['name']}({d['symbol']}): 価格{d['price']}円, RSI{d['rsi']}, RCI{d['rci']}" for d in stock_data_list])
-    prompt = f"以下の日本株について、テクニカル視点から変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析してください。\n\n{input_text}"
+    input_text = "\n".join([f"{d['alert']}{d['name']}({d['symbol']}): 価格{d['price']}円, RSI{d['rsi']}, RCI{d['rci']}" for d in stock_data_list])
+    prompt = f"""
+    あなたは凄腕のテクニカルトレーダーです。以下の日本株（特にアラート銘柄）について、
+    変動要因、上昇期待日、目標株価を3行で簡潔に分析してください。
+    【対象銘柄】
+    {input_text}
+    """
     try:
-        print("🤖 AI分析中...")
         time.sleep(15) 
         response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         return response.text if response.text else "分析失敗"
     except Exception as e:
-        return f"エラー: {str(e)}"
+        return f"AIエラー: {str(e)}"
 
+# --- 4. メインスキャン実行 ---
 def run_full_scan():
-    print("🚀 スキャン開始...")
+    TICKER_MAP = get_prime_ticker_list()
+    print(f"🚀 プライム市場 {len(TICKER_MAP)} 銘柄のスキャンを開始...")
+    
     all_stock_data = []
     
-    # 銘柄リストをループ
     for symbol, name in TICKER_MAP.items():
         try:
-            print(f"📡 データ取得中: {name} ({symbol})")
             stock = yf.Ticker(symbol)
             df = stock.history(period="6mo")
+            if df.empty or len(df) < 20: continue
             
-            if df.empty or len(df) < 20:
-                print(f"⚠️ {name} のデータが空です。スキップします。")
-                continue
+            last_p = df['Close'].iloc[-1]
+            # 以前の条件: 株価3,000円以上の高出来高銘柄を優先
+            if last_p < 3000: continue
             
             rsi = calculate_rsi(df['Close'], 14).iloc[-1]
             rci = calculate_rci(df['Close'], 9)[-1]
             
-            all_stock_data.append({
-                "symbol": symbol, "name": name, 
-                "price": f"{df['Close'].iloc[-1]:,.0f}",
-                "rsi": round(rsi, 1) if not np.isnan(rsi) else 0,
-                "rci": round(rci, 1) if not np.isnan(rci) else 0
-            })
-        except Exception as e:
-            print(f"❌ {symbol} 取得失敗: {e}")
-            continue
+            # --- ジャックさん指定の緊急アラート判定 ---
+            alert_prefix = ""
+            if rsi < 21 and rci < -79:
+                alert_prefix = "🔥【超絶売られすぎ・反発期待】\n"
+            elif rsi > 89 and rci > 94:
+                alert_prefix = "⚠️【超過熱・高値警戒】\n"
+            
+            # アラートが出ている銘柄、または主要24銘柄のみをAI分析対象にする
+            # (全銘柄送るとリミットに達するため、条件合致を優先)
+            if alert_prefix or len(all_stock_data) < 24:
+                all_stock_data.append({
+                    "symbol": symbol, "name": name, "price": f"{last_p:,.0f}",
+                    "rsi": round(rsi, 1), "rci": round(rci, 1), "alert": alert_prefix
+                })
+                print(f"✅ {name} をリストに追加")
+                
+        except: continue
 
-    if not all_stock_data:
-        msg = "❌ 条件に合致する銘柄データが取得できませんでした。yfinanceの制限の可能性があります。"
-        DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg).execute()
-        print(msg)
-        return
-
-    # AI分析
-    final_report = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%H:%M')})\n"
-    final_report += f"📊 対象銘柄数: {len(all_stock_data)}銘柄\n\n"
-    
+    # 結果をDiscordへ
+    final_report = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%m/%d %H:%M')})\n"
     batch_size = 5
     for i in range(0, len(all_stock_data), batch_size):
         batch = all_stock_data[i:i + batch_size]
         analysis_result = get_batch_ai_analysis(batch)
         final_report += analysis_result + "\n\n---\n\n"
 
-    # Discordへ送信
     for j in range(0, len(final_report), 1900):
         DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=final_report[j:j+1900]).execute()
-    
     print("✅ 完了")
 
 if __name__ == "__main__":
     run_full_scan()
+
