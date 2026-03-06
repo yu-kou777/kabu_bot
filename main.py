@@ -1,20 +1,19 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import google.generativeai as genai
+from google import genai # 最新のライブラリに変更
 from discord_webhook import DiscordWebhook
 import time
 import numpy as np
 from datetime import datetime
 import os
-import sys
 
 # --- 設定 ---
 GENAI_API_KEY = "AIzaSyAZZwHZrGLMhqWx1BEUwkGAkjC9DLylu5k"
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-genai.configure(api_key=GENAI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# 最新のクライアント設定
+client = genai.Client(api_key=GENAI_API_KEY)
 
 TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
@@ -27,7 +26,6 @@ TICKER_MAP = {
     "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
-# --- テクニカル計算ロジック ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -47,19 +45,23 @@ def calculate_rci(series, period=9):
     return rci
 
 def get_ai_prediction_safe(symbol, name, last_price, rsi, rci):
-    prompt = f"銘柄:{name}({symbol}), 価格:{last_price:.0f}円, RSI:{rsi:.1f}, RCI:{rci:.1f}。変動要因、上昇期待日、目標株価を3行で鋭く回答して。"
+    prompt = f"銘柄:{name}({symbol}), 価格:{last_price:.0f}円, RSI:{rsi:.1f}, RCI:{rci:.1f}。変動要因、上昇期待日、目標株価を3行で回答して。"
     for attempt in range(3):
         try:
             time.sleep(12) 
-            response = model.generate_content(prompt)
-            if response and response.text:
+            # 最新のGemini 2.0モデルを使用（爆速です）
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            if response.text:
                 return response.text
         except:
             time.sleep(20)
     return "分析制限中"
 
 def run_full_scan():
-    print(f"🚀 スキャン開始: {datetime.now()}")
+    print(f"🚀 スキャン開始...")
     results = []
     summary_items = []
     for symbol, name in TICKER_MAP.items():
@@ -67,49 +69,34 @@ def run_full_scan():
             stock = yf.Ticker(symbol)
             df = stock.history(period="6mo")
             if df.empty: continue
-            
             df['RSI'] = calculate_rsi(df['Close'], 14)
             df['RCI'] = calculate_rci(df['Close'], 9)
             last = df.iloc[-1]
-            
             ai_text = get_ai_prediction_safe(symbol, name, last['Close'], last['RSI'], last['RCI'])
-            
-            results.append({
-                "銘柄名": name, "コード": symbol, "現在値": f"{last['Close']:,.0f}円",
-                "RSI": round(last['RSI'], 1) if not np.isnan(last['RSI']) else 0, 
-                "RCI": round(last['RCI'], 1) if not np.isnan(last['RCI']) else 0, 
-                "AI予報": ai_text
-            })
+            results.append({"銘柄名": name, "コード": symbol, "現在値": f"{last['Close']:,.0f}円",
+                            "RSI": round(last['RSI'], 1), "RCI": round(last['RCI'], 1), "AI予報": ai_text})
             summary_items.append(f"🔹**{name}**({symbol}): {last['Close']:,.0f}円\n{ai_text}")
+            print(f"✅ {name} 完了")
         except Exception as e:
             print(f"Error {symbol}: {e}")
             continue
     
     if summary_items:
-        msg = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n" + "\n\n".join(summary_items)
+        msg = f"📢 **【Jack株AI 定刻報告】**\n\n" + "\n\n".join(summary_items)
         for i in range(0, len(msg), 1900):
             DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
-            
     pd.DataFrame(results).to_csv("last_scan_result.csv", index=False)
-    print("✅ スキャン完了")
+    print("✅ 全スキャン完了")
 
-# --- メイン処理の分岐 ---
-# GitHub Actionsなどの「背景実行」か、Streamlitの「画面表示」かを判定
-is_streamlit = "STREAMLIT_SERVER_PORT" in os.environ or "STREAMLIT_RUN_COMMAND" in os.environ
-
-if is_streamlit:
-    st.title("🏆 Jack株AI：最終兵器ダッシュボード")
+# --- 実行判定 ---
+if st.runtime.exists():
+    st.title("🏆 Jack株AI：最終兵器ボード")
     if st.button("🚀 今すぐ最新スキャンを実行"):
-        with st.spinner("AI精査中... (約5分)"):
+        with st.spinner("最新AI 2.0が精査中..."):
             run_full_scan()
         st.rerun()
-
     if os.path.exists("last_scan_result.csv"):
-        df_history = pd.read_csv("last_scan_result.csv")
-        st.subheader("📊 最新のスキャン結果")
-        st.dataframe(df_history, use_container_width=True)
-    else:
-        st.info("データがありません。スキャンを実行してください。")
+        st.dataframe(pd.read_csv("last_scan_result.csv"), use_container_width=True)
 else:
-    # GitHub Actions（背景）で実行された場合
+    # GitHub Actions等の背景実行
     run_full_scan()
