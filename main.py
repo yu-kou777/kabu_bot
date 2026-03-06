@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 
 # --- 設定 ---
-GENAI_API_KEY = "gen-lang-client-0447054408"
+GENAI_API_KEY = "AIzaSyAZZwHZrGLMhqWx1BEUwkGAkjC9DLylu5k"
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 genai.configure(api_key=GENAI_API_KEY)
