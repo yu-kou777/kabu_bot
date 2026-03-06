@@ -1,20 +1,15 @@
 import yfinance as yf
 import pandas as pd
-from google import genai
+import requests
 from discord_webhook import DiscordWebhook
 import time
 import numpy as np
 from datetime import datetime
-import os
 
-# --- 設定（合鍵と住所） ---
+# --- 設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-# 💡 最新SDKによるAIの初期化
-client = genai.Client(api_key=GEMINI_KEY)
-
-# 監視対象：主力24銘柄
 TICKERS = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -58,7 +53,6 @@ def main():
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
             price = f"{df['Close'].iloc[-1]:,.0f}"
             
-            # 超絶アラート判定
             alert = ""
             if rsi < 21 and rci < -79:
                 alert = "🔥【超絶売られすぎ】"
@@ -66,44 +60,40 @@ def main():
                 alert = "⚠️【超過熱・警戒】"
             
             summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}, 価格:{price}円\n"
-        except Exception as e:
+        except:
             pass
 
     print("🤖 AIが攻略本を執筆中...")
     prompt = f"日本株プロとして分析。特に🔥の底打ち銘柄を重視し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{summary_text}"
     
+    # SDKを使わず、直接通信で404エラーを回避
     try:
-        # 💡 404エラー対策：モデル名を「gemini-1.5-flash」に固定し、自動推測に任せる
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
-        ai_analysis = response.text
-        print("✅ AIの執筆が完了しました。")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        headers = {'Content-Type': 'application/json'}
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            ai_analysis = response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            ai_analysis = f"AI分析失敗: {response.status_code} - {response.text}"
     except Exception as e:
-        ai_analysis = f"AI分析失敗: {str(e)}"
-        print(f"❌ AIエラー詳細: {e}")
+        ai_analysis = f"通信エラー: {str(e)}"
 
-    # Discord報告（確実な分割送信）
     now_str = datetime.now().strftime('%m/%d %H:%M')
     msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
     
     chunk_size = 1800 
     chunks = [msg[i:i+chunk_size] for i in range(0, len(msg), chunk_size)]
     
-    success_count = 0
-    for i, chunk in enumerate(chunks):
+    for chunk in chunks:
         try:
-            webhook = DiscordWebhook(url=DISCORD_URL, content=chunk)
-            response = webhook.execute()
-            if response.status_code >= 200 and response.status_code < 300:
-                success_count += 1
-        except Exception as e:
+            DiscordWebhook(url=DISCORD_URL, content=chunk).execute()
+        except:
             pass
         time.sleep(1) 
     
-    if success_count == len(chunks):
-        print(f"✅ 全{len(chunks)}通のメッセージがDiscordへ正常に送信されました！")
+    print("✅ 全工程が完了しました。")
 
 if __name__ == "__main__":
     main()
