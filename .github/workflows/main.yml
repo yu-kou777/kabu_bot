@@ -1,9 +1,9 @@
 name: Jack_Scheduled_Scan
 on:
   schedule:
-    - cron: '00 04 * * *' # 日本時間 13:00
-    - cron: '00 07 * * *' # 日本時間 16:00
-  workflow_dispatch:
+    - cron: '00 04 * * *' # 日本時間 13:00 (平日)
+    - cron: '00 07 * * *' # 日本時間 16:00 (平日)
+  workflow_dispatch:      # 手動実行用ボタン
 
 jobs:
   build:
@@ -19,11 +19,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas google-genai discord-webhook numpy streamlit
+          pip install yfinance pandas google-genai discord-webhook numpy xlrd openpyxl
 
       - name: Run Scan
+        # 💡 ここで GitHub Secrets の情報をプログラムに注入します
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 💡 ここが今回のエラー修正のポイントです！
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
