@@ -14,9 +14,13 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+          cache: 'pip' # これで次回から爆速になります
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas google-generativeai discord-webhook numpy streamlit
+          # バージョンを固定してインストール時間の肥大化を防ぎます
+          pip install "yfinance>=0.2.40" "pandas<2.2.0" "numpy<2.0.0" "google-genai" "discord-webhook" "streamlit"
+
       - name: Run Scan
         run: python main.py
