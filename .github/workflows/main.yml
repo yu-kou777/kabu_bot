@@ -13,12 +13,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10' # 安定性のために3.10を指定します
+          python-version: '3.11'
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # pandas-taが動く安定したバージョンを指定
-          pip install "pandas<2.1.0" "numpy<2.0.0"
-          pip install yfinance google-generativeai discord-webhook pandas-ta
+          pip install yfinance pandas google-generativeai discord-webhook numpy
       - name: Run Scan
         run: python main.py
