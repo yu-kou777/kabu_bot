@@ -7,15 +7,15 @@ import time
 import numpy as np
 from datetime import datetime
 import os
+import sys
 
-# --- 設定（ジャックさんの最新キー） ---
+# --- 設定 ---
 GENAI_API_KEY = "AIzaSyAZZwHZrGLMhqWx1BEUwkGAkjC9DLylu5k"
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
 genai.configure(api_key=GENAI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# 銘柄リスト
 TICKER_MAP = {
     "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
     "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
@@ -27,8 +27,8 @@ TICKER_MAP = {
     "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
 }
 
+# --- テクニカル計算ロジック ---
 def calculate_rsi(series, period=14):
-    """RSIを独自計算"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -36,7 +36,6 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_rci(series, period=9):
-    """RCIを独自計算"""
     if len(series) < period: return np.zeros(len(series))
     rci = np.zeros(len(series))
     for i in range(period - 1, len(series)):
@@ -60,6 +59,7 @@ def get_ai_prediction_safe(symbol, name, last_price, rsi, rci):
     return "分析制限中"
 
 def run_full_scan():
+    print(f"🚀 スキャン開始: {datetime.now()}")
     results = []
     summary_items = []
     for symbol, name in TICKER_MAP.items():
@@ -68,40 +68,48 @@ def run_full_scan():
             df = stock.history(period="6mo")
             if df.empty: continue
             
-            # テクニカル指標を自作関数で計算
             df['RSI'] = calculate_rsi(df['Close'], 14)
             df['RCI'] = calculate_rci(df['Close'], 9)
             last = df.iloc[-1]
             
             ai_text = get_ai_prediction_safe(symbol, name, last['Close'], last['RSI'], last['RCI'])
             
-            data = {
+            results.append({
                 "銘柄名": name, "コード": symbol, "現在値": f"{last['Close']:,.0f}円",
                 "RSI": round(last['RSI'], 1) if not np.isnan(last['RSI']) else 0, 
                 "RCI": round(last['RCI'], 1) if not np.isnan(last['RCI']) else 0, 
                 "AI予報": ai_text
-            }
-            results.append(data)
+            })
             summary_items.append(f"🔹**{name}**({symbol}): {last['Close']:,.0f}円\n{ai_text}")
-        except:
+        except Exception as e:
+            print(f"Error {symbol}: {e}")
             continue
     
     if summary_items:
-        full_msg = f"📢 **【Jack株AI 定刻スキャン報告】** ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n" + "\n\n".join(summary_items)
-        for i in range(0, len(full_msg), 1900):
-            DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=full_msg[i:i+1900]).execute()
+        msg = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n" + "\n\n".join(summary_items)
+        for i in range(0, len(msg), 1900):
+            DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
             
     pd.DataFrame(results).to_csv("last_scan_result.csv", index=False)
-    return results
+    print("✅ スキャン完了")
 
-st.title("🏆 Jack株AI：最終兵器ダッシュボード")
+# --- メイン処理の分岐 ---
+# GitHub Actionsなどの「背景実行」か、Streamlitの「画面表示」かを判定
+is_streamlit = "STREAMLIT_SERVER_PORT" in os.environ or "STREAMLIT_RUN_COMMAND" in os.environ
 
-if st.button("🚀 今すぐ最新スキャンを実行"):
-    with st.spinner("AI精査中... (約5分かかります)"):
-        run_full_scan()
-    st.rerun()
+if is_streamlit:
+    st.title("🏆 Jack株AI：最終兵器ダッシュボード")
+    if st.button("🚀 今すぐ最新スキャンを実行"):
+        with st.spinner("AI精査中... (約5分)"):
+            run_full_scan()
+        st.rerun()
 
-if os.path.exists("last_scan_result.csv"):
-    df_history = pd.read_csv("last_scan_result.csv")
-    st.subheader("📊 最新のスキャン結果")
-    st.dataframe(df_history, use_container_width=True)
+    if os.path.exists("last_scan_result.csv"):
+        df_history = pd.read_csv("last_scan_result.csv")
+        st.subheader("📊 最新のスキャン結果")
+        st.dataframe(df_history, use_container_width=True)
+    else:
+        st.info("データがありません。スキャンを実行してください。")
+else:
+    # GitHub Actions（背景）で実行された場合
+    run_full_scan()
