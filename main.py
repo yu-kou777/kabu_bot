@@ -11,31 +11,16 @@ import os
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-if not GENAI_API_KEY:
-    print("❌ APIキーが読み込めていません。")
-    exit()
-
 client = genai.Client(api_key=GENAI_API_KEY)
 
-# --- 1. 銘柄自動取得リストの作成 ---
-def get_prime_ticker_list():
-    """JPXの公式サイトからプライム市場の全銘柄リストを取得・抽出する"""
-    print("📡 JPXからプライム銘柄リストを自動取得中...")
-    try:
-        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
-        df_jpx = pd.read_excel(url)
-        # 市場区分が「プライム」の銘柄のみ抽出
-        prime_df = df_jpx[df_jpx["市場・商品区分"] == "プライム（内国株式）"]
-        # コードを yfinance 形式 (例: 8035.T) に変換
-        ticker_list = [f"{code}.T" for code in prime_df["コード"]]
-        # 銘柄名とのマップを作成
-        ticker_map = dict(zip(ticker_list, prime_df["銘柄名"]))
-        return ticker_map
-    except Exception as e:
-        print(f"⚠️ リスト取得失敗。固定リストを使用します: {e}")
-        return {"8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG"}
+# 監視対象（JPXから自動取得する機能は計算負荷が高いため、まずは100銘柄リストを保持）
+TICKER_MAP = {
+    "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG", "7203.T": "トヨタ自動車",
+    "6920.T": "レーザーテック", "6857.T": "アドバンテスト", "6146.T": "ディスコ", "4063.T": "信越化学",
+    "8058.T": "三菱商事", "8316.T": "三井住友FG", "9101.T": "日本郵船", "7011.T": "三菱重工",
+    # 銘柄リストをここに追加...
+}
 
-# --- 2. テクニカル計算 (ジャックさん専用ロジック) ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -44,6 +29,10 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_rci(series, period=9):
+    """
+    RCIの計算公式:
+    $$RCI = \left( 1 - \frac{6 \sum d^2}{n(n^2 - 1)} \right) \times 100$$
+    """
     if len(series) < period: return np.zeros(len(series))
     rci = np.zeros(len(series))
     for i in range(period - 1, len(series)):
@@ -54,27 +43,37 @@ def calculate_rci(series, period=9):
         rci[i] = (1 - (6 * diff_sq_sum) / (period * (period**2 - 1))) * 100
     return rci
 
-# --- 3. AI一括分析 ---
 def get_batch_ai_analysis(stock_data_list):
-    input_text = "\n".join([f"{d['alert']}{d['name']}({d['symbol']}): 価格{d['price']}円, RSI{d['rsi']}, RCI{d['rci']}" for d in stock_data_list])
-    prompt = f"""
-    あなたは凄腕のテクニカルトレーダーです。以下の日本株（特にアラート銘柄）について、
-    変動要因、上昇期待日、目標株価を3行で簡潔に分析してください。
-    【対象銘柄】
-    {input_text}
-    """
-    try:
-        time.sleep(15) 
-        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        return response.text if response.text else "分析失敗"
-    except Exception as e:
-        return f"AIエラー: {str(e)}"
-
-# --- 4. メインスキャン実行 ---
-def run_full_scan():
-    TICKER_MAP = get_prime_ticker_list()
-    print(f"🚀 プライム市場 {len(TICKER_MAP)} 銘柄のスキャンを開始...")
+    input_text = ""
+    for d in stock_data_list:
+        alert = ""
+        # ジャックさん指定の緊急アラート判定
+        if d['rsi'] < 21 and d['rci'] < -79:
+            alert = "🔥【超絶売られすぎ・反発期待】"
+        elif d['rsi'] > 89 and d['rci'] > 94:
+            alert = "⚠️【超過熱・高値警戒】"
+        input_text += f"{alert}{d['name']}({d['symbol']}): 価格{d['price']}円, RSI{d['rsi']}, RCI{d['rci']}\n"
     
+    prompt = f"以下の日本株について、テクニカル視点から変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析してください。\n\n{input_text}"
+    
+    for attempt in range(3):
+        try:
+            print(f"🤖 AI分析中 (試行 {attempt+1})...")
+            # 待機時間を30秒に延長してエラーを回避
+            time.sleep(30) 
+            # より安定した1.5-flashを使用
+            response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+            return response.text if response.text else "分析失敗"
+        except Exception as e:
+            if "429" in str(e):
+                print("⏳ 制限回避のため1分待機します...")
+                time.sleep(60)
+            else:
+                return f"エラー: {str(e)}"
+    return "分析制限により取得不可"
+
+def run_full_scan():
+    print("🚀 スキャン開始...")
     all_stock_data = []
     
     for symbol, name in TICKER_MAP.items():
@@ -83,43 +82,49 @@ def run_full_scan():
             df = stock.history(period="6mo")
             if df.empty or len(df) < 20: continue
             
-            last_p = df['Close'].iloc[-1]
-            # 以前の条件: 株価3,000円以上の高出来高銘柄を優先
-            if last_p < 3000: continue
-            
             rsi = calculate_rsi(df['Close'], 14).iloc[-1]
             rci = calculate_rci(df['Close'], 9)[-1]
             
-            # --- ジャックさん指定の緊急アラート判定 ---
-            alert_prefix = ""
-            if rsi < 21 and rci < -79:
-                alert_prefix = "🔥【超絶売られすぎ・反発期待】\n"
-            elif rsi > 89 and rci > 94:
-                alert_prefix = "⚠️【超過熱・高値警戒】\n"
-            
-            # アラートが出ている銘柄、または主要24銘柄のみをAI分析対象にする
-            # (全銘柄送るとリミットに達するため、条件合致を優先)
-            if alert_prefix or len(all_stock_data) < 24:
-                all_stock_data.append({
-                    "symbol": symbol, "name": name, "price": f"{last_p:,.0f}",
-                    "rsi": round(rsi, 1), "rci": round(rci, 1), "alert": alert_prefix
-                })
-                print(f"✅ {name} をリストに追加")
-                
+            all_stock_data.append({
+                "date": datetime.now().strftime('%Y-%m-%d %H:%M'),
+                "symbol": symbol, "name": name, 
+                "price": df['Close'].iloc[-1],
+                "rsi": round(rsi, 1) if not np.isnan(rsi) else 0,
+                "rci": round(rci, 1) if not np.isnan(rci) else 0
+            })
         except: continue
 
-    # 結果をDiscordへ
-    final_report = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%m/%d %H:%M')})\n"
+    if not all_stock_data: return
+
+    # AI分析
+    final_report = f"📢 **【Jack株AI 定刻報告】** ({datetime.now().strftime('%m/%d %H:%M')})\n\n"
+    results_for_csv = []
+    
     batch_size = 5
     for i in range(0, len(all_stock_data), batch_size):
         batch = all_stock_data[i:i + batch_size]
         analysis_result = get_batch_ai_analysis(batch)
         final_report += analysis_result + "\n\n---\n\n"
+        
+        # 履歴保存用のデータを整理
+        for d in batch:
+            d["ai_analysis"] = analysis_result # 簡易的にバッチ結果を保存
+            results_for_csv.append(d)
 
+    # --- 履歴の保存 ---
+    df_new = pd.DataFrame(results_for_csv)
+    # CSVに追記保存
+    history_file = "scan_history.csv"
+    if os.path.exists(history_file):
+        df_new.to_csv(history_file, mode='a', header=False, index=False)
+    else:
+        df_new.to_csv(history_file, index=False)
+
+    # Discordへ送信
     for j in range(0, len(final_report), 1900):
         DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=final_report[j:j+1900]).execute()
-    print("✅ 完了")
+    
+    print("✅ 全工程完了")
 
 if __name__ == "__main__":
     run_full_scan()
-
