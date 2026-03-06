@@ -1,8 +1,8 @@
+streamlit
 yfinance
 pandas
 google-genai
 discord-webhook
 numpy
-gspread
-google-auth
-streamlit
+xlrd>=2.0.1
+openpyxl
