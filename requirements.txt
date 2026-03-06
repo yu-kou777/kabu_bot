@@ -1,8 +1,5 @@
-streamlit>=1.31.0
 yfinance>=0.2.50
 pandas
 google-genai
 discord-webhook
 numpy
-xlrd
-openpyxl
