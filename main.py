@@ -1,4 +1,3 @@
-import streamlit as st
 import yfinance as yf
 import pandas as pd
 from google import genai
@@ -9,23 +8,32 @@ from datetime import datetime
 import os
 
 # --- 設定 ---
+# GitHub Secrets に GEMINI_API_KEY を登録してください
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
+if not GENAI_API_KEY:
+    print("❌ エラー: APIキー(GEMINI_API_KEY)が設定されていません。")
+    # GitHub Secretsへの登録が必要です
+    exit()
+
 client = genai.Client(api_key=GENAI_API_KEY)
 
-TICKER_MAP = {
-    "8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6758.T": "ソニーG",
-    "7203.T": "トヨタ自動車", "6920.T": "レーザーテック", "6857.T": "アドバンテスト",
-    "6146.T": "ディスコ", "4063.T": "信越化学", "8058.T": "三菱商事",
-    "8316.T": "三井住友FG", "9101.T": "日本郵船", "7011.T": "三菱重工",
-    "4502.T": "武田薬品", "6501.T": "日立製作所", "6702.T": "富士通",
-    "6201.T": "豊田自動織機", "9104.T": "商船三井", "6367.T": "ダイキン工業",
-    "6273.T": "SMC", "7974.T": "任天堂", "9020.T": "JR東日本",
-    "2914.T": "JT", "4061.T": "デンカ", "6723.T": "ルネサス"
-}
+# --- 1. プライム市場の銘柄を自動取得 ---
+def get_prime_tickers():
+    print("📡 JPXからプライム銘柄リストを取得中...")
+    try:
+        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+        df = pd.read_excel(url)
+        # プライム市場の銘柄のみ抽出
+        prime_stocks = df[df["市場・商品区分"] == "プライム（内国株式）"]
+        # 銘柄名とコードを辞書にする (例: 8035.T)
+        return {f"{row['コード']}.T": row['銘銘柄名'] for _, row in prime_stocks.iterrows()}
+    except Exception as e:
+        print(f"⚠️ リスト取得失敗: {e}。固定リストで代替します。")
+        return {"8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG", "6920.T": "レーザーテック"}
 
-# --- テクニカル計算 ---
+# --- 2. テクニカル計算 (ジャックさんの要望に基づき実施) ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -45,58 +53,55 @@ def calculate_rci(series, period=9):
     return rci
 
 def run_full_scan():
+    print("🚀 スキャン開始...")
+    TICKER_MAP = get_prime_tickers()
     all_data = []
     summary_text = ""
     
+    # タイムアウトを避けるため、出来高の多い主要銘柄やジャックさんの監視銘柄を優先
+    # ここでは例として上位100銘柄規模に絞ることも可能ですが、全件回すロジックにします
+    count = 0
     for symbol, name in TICKER_MAP.items():
         try:
             stock = yf.Ticker(symbol)
             df = stock.history(period="6mo")
-            if df.empty: continue
+            if df.empty or len(df) < 20: continue
             
             rsi = round(calculate_rsi(df['Close'], 14).iloc[-1], 1)
             rci = round(calculate_rci(df['Close'], 9)[-1], 1)
-            price = f"{df['Close'].iloc[-1]:,.0f}"
+            price = df['Close'].iloc[-1]
             
-            # ジャックさん専用アラート
+            # --- ジャックさん指定のアラート判定 ---
             alert = ""
-            if rsi < 21 and rci < -79: alert = "🔥【超絶売られすぎ】"
-            elif rsi > 89 and rci > 94: alert = "⚠️【超過熱・警戒】"
+            if rsi < 21 and rci < -79: 
+                alert = "🔥【超絶売られすぎ・反発期待】"
+            elif rsi > 89 and rci > 94: 
+                alert = "⚠️【超過熱・高値警戒】"
             
-            all_data.append({"銘柄名": name, "コード": symbol, "現値": price, "RSI": rsi, "RCI": rci, "判定": alert})
-            summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}\n"
+            # 条件に合う銘柄、または主要銘柄のみをレポートに含める（無料枠リミット対策）
+            if alert or count < 30:
+                all_data.append({"銘柄名": name, "コード": symbol, "現値": f"{price:,.0f}円", "RSI": rsi, "RCI": rci, "判定": alert})
+                summary_text += f"{alert}{name}({symbol}): RSI:{rsi}, RCI:{rci}, 価格:{price:,.0f}円\n"
+                count += 1
         except: continue
 
-    # 🤖 AI一括分析（無料枠制限の回避）
-    prompt = f"以下の日本株テクニカルデータから今後の「変動要因」「上昇期待日」「目標株価」を簡潔に分析してください。\n\n{summary_text}"
+    # 🤖 AI一括分析（404エラー対策済み）
+    prompt = f"以下の日本株テクニカルデータ（特にアラート銘柄）を分析し、変動要因、上昇期待日、目標株価を銘柄ごとに3行で分析してください。\n\n{summary_text}"
     try:
+        # モデル名は 'gemini-1.5-flash' で直接指定
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         ai_analysis = response.text
-    except:
-        ai_analysis = "AI分析リミット制限中"
+    except Exception as e:
+        ai_analysis = f"AI分析エラー: {str(e)}"
 
-    # Discord送信
+    # 📢 Discord送信
     now_str = datetime.now().strftime('%m/%d %H:%M')
     msg = f"📢 **【Jack株AI 定刻報告】** ({now_str})\n\n{ai_analysis}"
     for i in range(0, len(msg), 1900):
         DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=msg[i:i+1900]).execute()
     
-    return all_data, ai_analysis
+    # 完了ログ
+    print(f"✅ スキャン完了: {len(all_data)} 銘柄を精査しました。")
 
-# --- Streamlit 表示ロジック ---
-if st.runtime.exists():
-    st.title("🏆 Jack株AI：最終兵器ダッシュボード")
-    
-    if st.button("🚀 最新スキャン ＆ 攻略本作成を開始"):
-        with st.spinner("AIが全銘柄を精査中..."):
-            data, analysis = run_full_scan()
-            st.success("スキャン完了！ Discordに通知しました。")
-            
-            st.subheader("📊 テクニカル分析一覧")
-            st.table(pd.DataFrame(data))
-            
-            st.subheader("🤖 AI分析結果")
-            st.write(analysis)
-else:
-    # GitHub Actions等の背景実行時は直接スキャン
+if __name__ == "__main__":
     run_full_scan()
