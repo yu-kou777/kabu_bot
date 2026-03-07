@@ -9,9 +9,7 @@ from datetime import datetime
 # --- 設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
-
-# フィルター設定（変更可能）
-MIN_VOLUME_MA5 = 300000  # 直近5日間の平均出来高が30万株以上の銘柄に絞る
+MIN_VOLUME_MA5 = 300000
 
 def get_prime_tickers():
     print("📡 JPXからプライム銘柄リストを自動取得中...")
@@ -50,7 +48,7 @@ def main():
     TICKERS = get_prime_tickers()
     tickers_list = list(TICKERS.keys())
     
-    print("📡 株価データと出来高を分割ダウンロード中 (約2〜3分)...")
+    print("📡 株価データと出来高を分割ダウンロード中...")
     close_prices_list = []
     volumes_list = []
     chunk_size = 200
@@ -64,7 +62,6 @@ def main():
                 close_prices_list.append(data['Close'])
                 volumes_list.append(data['Volume'])
             else:
-                # チャンクが1銘柄のみの場合の安全処理
                 ticker = chunk[0]
                 close_prices_list.append(data[['Close']].rename(columns={'Close': ticker}))
                 volumes_list.append(data[['Volume']].rename(columns={'Volume': ticker}))
@@ -96,10 +93,9 @@ def main():
             
             if len(series_close) < 15 or len(series_vol) < 5: continue
             
-            # 💡【出来高フィルター】直近5日間の平均出来高をチェック
             vol_ma5 = series_vol.tail(5).mean()
             if vol_ma5 < MIN_VOLUME_MA5:
-                continue # 出来高不足の銘柄はここで足切り
+                continue
             
             rsi = round(calculate_rsi(series_close, 14).iloc[-1], 1)
             rci = round(calculate_rci(series_close, 9)[-1], 1)
@@ -154,7 +150,8 @@ def main():
         prompt = f"日本株プロとしてテクニカル分析せよ。以下のシグナル点灯銘柄（出来高選抜済み）について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
         
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+            # 💡 URLを修正し、最新のモデル名「gemini-1.5-flash-latest」を指定
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
             headers = {'Content-Type': 'application/json'}
             data = {"contents": [{"parts": [{"text": prompt}]}]}
             response = requests.post(url, headers=headers, json=data)
@@ -168,12 +165,11 @@ def main():
                     time.sleep(1)
                 print("✅ 第二陣：AI攻略本の送信完了！")
             else:
-                print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code})")
-        except:
-            print("⚠️ AI通信エラーのため裏方で処理を終了します。")
+                print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code} - {response.text})")
+        except Exception as e:
+            print(f"⚠️ AI通信エラーのため裏方で処理を終了します: {e}")
     else:
         print("💤 シグナル銘柄がないため、AI分析はスキップしました。")
 
 if __name__ == "__main__":
     main()
-
