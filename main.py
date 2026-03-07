@@ -10,8 +10,10 @@ from datetime import datetime
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
+# フィルター設定（変更可能）
+MIN_VOLUME_MA5 = 300000  # 直近5日間の平均出来高が30万株以上の銘柄に絞る
+
 def get_prime_tickers():
-    """JPX公式からプライム市場の銘柄リストを取得"""
     print("📡 JPXからプライム銘柄リストを自動取得中...")
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
@@ -22,7 +24,6 @@ def get_prime_tickers():
         return tickers
     except Exception as e:
         print(f"❌ リスト取得失敗: {e}")
-        # 失敗した時のためのフォールバック（緊急用）
         return {"8035.T": "東京エレクトロン", "9984.T": "ソフトバンクG"}
 
 def calculate_rsi(series, period=14):
@@ -49,13 +50,33 @@ def main():
     TICKERS = get_prime_tickers()
     tickers_list = list(TICKERS.keys())
     
-    # 1. 株価データを一括ダウンロード（高速化）
-    print("📡 株価データを一括ダウンロード中 (約1〜2分かかります)...")
-    # yfinanceの仕様上、大量ダウンロードの進行状況が表示されます
-    data = yf.download(tickers_list, period="6mo", threads=True, progress=False)
-    close_prices = data['Close']
+    print("📡 株価データと出来高を分割ダウンロード中 (約2〜3分)...")
+    close_prices_list = []
+    volumes_list = []
+    chunk_size = 200
     
-    # 💡 抽出グループ（Discordパンク防止のため、強いシグナルのみ厳選）
+    for i in range(0, len(tickers_list), chunk_size):
+        chunk = tickers_list[i:i+chunk_size]
+        data = yf.download(chunk, period="6mo", threads=True, progress=False)
+        
+        if not data.empty:
+            if isinstance(data.columns, pd.MultiIndex):
+                close_prices_list.append(data['Close'])
+                volumes_list.append(data['Volume'])
+            else:
+                # チャンクが1銘柄のみの場合の安全処理
+                ticker = chunk[0]
+                close_prices_list.append(data[['Close']].rename(columns={'Close': ticker}))
+                volumes_list.append(data[['Volume']].rename(columns={'Volume': ticker}))
+        time.sleep(2)
+        
+    if close_prices_list:
+        close_prices = pd.concat(close_prices_list, axis=1)
+        volumes = pd.concat(volumes_list, axis=1)
+    else:
+        print("❌ データの取得に失敗しました。")
+        return
+
     groups = {
         "🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下": [],
         "⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上": [],
@@ -65,23 +86,30 @@ def main():
         "⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き": []
     }
     
-    print("⚙️ テクニカル指標を計算中...")
-    # 2. 各銘柄の計算と判定
+    print("⚙️ テクニカル指標と出来高フィルターを計算中...")
     for symbol, name in TICKERS.items():
         try:
-            if symbol not in close_prices.columns: continue
-            series = close_prices[symbol].dropna()
-            if len(series) < 15: continue
+            if symbol not in close_prices.columns or symbol not in volumes.columns: continue
             
-            rsi = round(calculate_rsi(series, 14).iloc[-1], 1)
-            rci = round(calculate_rci(series, 9)[-1], 1)
-            prev_rsi = round(calculate_rsi(series, 14).iloc[-2], 1)
-            prev_rci = round(calculate_rci(series, 9)[-2], 1)
-            price = f"{series.iloc[-1]:,.0f}"
+            series_close = close_prices[symbol].dropna()
+            series_vol = volumes[symbol].dropna()
             
-            info_str = f"  ・{name} ({symbol}): RSI {rsi} / RCI {rci} [{price}円]"
+            if len(series_close) < 15 or len(series_vol) < 5: continue
             
-            # 厳格なAND条件判定
+            # 💡【出来高フィルター】直近5日間の平均出来高をチェック
+            vol_ma5 = series_vol.tail(5).mean()
+            if vol_ma5 < MIN_VOLUME_MA5:
+                continue # 出来高不足の銘柄はここで足切り
+            
+            rsi = round(calculate_rsi(series_close, 14).iloc[-1], 1)
+            rci = round(calculate_rci(series_close, 9)[-1], 1)
+            prev_rsi = round(calculate_rsi(series_close, 14).iloc[-2], 1)
+            prev_rci = round(calculate_rci(series_close, 9)[-2], 1)
+            price = f"{series_close.iloc[-1]:,.0f}"
+            vol_str = f"{vol_ma5/10000:.0f}万株"
+            
+            info_str = f"  ・{name} ({symbol}): RSI {rsi} / RCI {rci} [{price}円 | 平均出来高 {vol_str}]"
+            
             if rci <= -95 and rsi <= 20:
                 groups["🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下"].append(info_str)
             elif rci >= 95 and rsi >= 80:
@@ -97,9 +125,9 @@ def main():
         except:
             pass
 
-    # 3. Discord送信用のメッセージ構築
     now_str = datetime.now().strftime('%m/%d %H:%M')
-    data_msg = f"📊 **【Jack株AI プライム全市場 スキャン速報】** ({now_str})\n\n"
+    data_msg = f"📊 **【Jack株AI プライム選抜 スキャン速報】** ({now_str})\n"
+    data_msg += f"※流動性フィルター：5日平均出来高 {MIN_VOLUME_MA5/10000:.0f}万株以上\n\n"
     has_signals = False
     
     for group_name, stocks in groups.items():
@@ -111,9 +139,8 @@ def main():
             data_msg += "\n"
             
     if not has_signals:
-        data_msg += "現在、プライム市場で指定の強力なシグナルに合致する銘柄はありません。\n"
+        data_msg += "現在、指定の強力なシグナルと出来高条件に合致する銘柄はありません。\n"
 
-    # 【第一陣】速報をDiscordへ送信
     try:
         for i in range(0, len(data_msg), 1900):
             DiscordWebhook(url=DISCORD_URL, content=data_msg[i:i+1900]).execute()
@@ -122,20 +149,19 @@ def main():
     except Exception as e:
         print(f"❌ 速報の送信に失敗: {e}")
 
-    # 4. 【第二陣】AIにシグナル銘柄だけを分析させる
     if has_signals:
         print("🤖 AIがシグナル抽出銘柄の攻略本を執筆中...")
-        prompt = f"日本株プロとしてテクニカル分析せよ。以下のプライム市場のシグナル点灯銘柄について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
+        prompt = f"日本株プロとしてテクニカル分析せよ。以下のシグナル点灯銘柄（出来高選抜済み）について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
         
         try:
-            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
             headers = {'Content-Type': 'application/json'}
             data = {"contents": [{"parts": [{"text": prompt}]}]}
             response = requests.post(url, headers=headers, json=data)
             
             if response.status_code == 200:
                 ai_analysis = response.json()['candidates'][0]['content']['parts'][0]['text']
-                ai_msg = f"🤖 **【AI攻略本 (プライム厳選)】**\n\n{ai_analysis}"
+                ai_msg = f"🤖 **【AI攻略本 (流動性厳選)】**\n\n{ai_analysis}"
                 
                 for i in range(0, len(ai_msg), 1900):
                     DiscordWebhook(url=DISCORD_URL, content=ai_msg[i:i+1900]).execute()
@@ -150,3 +176,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
