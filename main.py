@@ -9,7 +9,7 @@ from datetime import datetime
 # --- 基本設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
-MIN_VOLUME_MA5 = 300000 # 出来高フィルター：平均30万株以上
+MIN_VOLUME_MA5 = 300000 # 5日平均出来高30万株以上
 
 def get_prime_tickers():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
@@ -20,13 +20,13 @@ def get_prime_tickers():
     except:
         return {"8035.T": "東京エレクトロン"}
 
-def get_rsi_vectorized(df, period=14):
+def get_rsi_vectorized(df, period):
     delta = df.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
-def get_rci_vectorized(df, period=9):
+def get_rci_vectorized(df, period):
     def rci_func(x):
         n = len(x)
         d = np.sum((np.arange(n, 0, -1) - x.argsort().argsort() - 1)**2)
@@ -35,14 +35,14 @@ def get_rci_vectorized(df, period=9):
 
 def main():
     start_time = time.time()
-    print("🚀 ジャック株AI：条件1（標準）＆ 条件2（MA複合）同時スキャン開始...")
+    print("🚀 ジャック株AI：短期・長期クロス判定スキャン開始...")
     
     TICKERS_DICT = get_prime_tickers()
     tickers_list = list(TICKERS_DICT.keys())
     
-    # 📡 2年分のデータを分割取得（MA200計算用）
+    # 📡 2年分のデータを分割取得
     all_close, all_volume = [], []
-    chunk_size = 400
+    chunk_size = 300
     for i in range(0, len(tickers_list), chunk_size):
         chunk = tickers_list[i:i+chunk_size]
         data = yf.download(chunk, period="2y", threads=True, progress=False, group_by='column')
@@ -54,86 +54,88 @@ def main():
     close_df = pd.concat(all_close, axis=1)
     volume_df = pd.concat(all_volume, axis=1)
 
-    # ⚙️ 指標一括計算（ベクトル演算で高速化）
-    rsi_all = get_rsi_vectorized(close_df)
-    rci_all = get_rci_vectorized(close_df)
+    # ⚙️ 指標一括計算（短期・長期のペア）
+    print("⚙️ RSI/RCIの短期・長期線を計算中...")
+    rsi_s = get_rsi_vectorized(close_df, 9)
+    rsi_l = get_rsi_vectorized(close_df, 14)
+    rci_s = get_rci_vectorized(close_df, 9)
+    rci_l = get_rci_vectorized(close_df, 26)
+    
     ma20_all = close_df.rolling(20).mean()
     ma60_all = close_df.rolling(60).mean()
     ma200_all = close_df.rolling(200).mean()
     vol_ma5_all = volume_df.rolling(5).mean()
 
-    # 💡 カテゴリ分け（条件1と条件2）
-    standard_reports = []  # 条件1: MA不問・数値クリアのみ
-    compound_reports = []  # 条件2: MAトレンド合致（複合選定）
+    standard_reports = []  # 条件1: MA不問・数値/クロス
+    compound_reports = []  # 条件2: MAトレンド合致（複合）
 
+    print("🎯 シグナル判定中...")
     for symbol in close_df.columns:
         try:
-            # 出来高フィルター
             if vol_ma5_all[symbol].iloc[-1] < MIN_VOLUME_MA5: continue
             
-            rsi, rci = rsi_all[symbol].iloc[-1], rci_all[symbol].iloc[-1]
-            p_rsi, p_rci = rsi_all[symbol].iloc[-2], rci_all[symbol].iloc[-2]
-            m20, m60, m200 = ma20_all[symbol], ma60_all[symbol], ma200_all[symbol]
+            # 各指標の当日・前日値
+            cur_rs, cur_rl = rsi_s[symbol].iloc[-1], rsi_l[symbol].iloc[-1]
+            pre_rs, pre_rl = rsi_s[symbol].iloc[-2], rsi_l[symbol].iloc[-2]
+            cur_rcs, cur_rcl = rci_s[symbol].iloc[-1], rci_l[symbol].iloc[-1]
+            pre_rcs, pre_rcl = rci_s[symbol].iloc[-2], rci_l[symbol].iloc[-2]
             
-            # MAトレンド判定
+            m20, m60, m200 = ma20_all[symbol], ma60_all[symbol], ma200_all[symbol]
             is_all_up = (m20.iloc[-1] > m20.iloc[-2]) and (m60.iloc[-1] > m60.iloc[-2]) and (m200.iloc[-1] > m200.iloc[-2])
             is_all_down = (m20.iloc[-1] < m20.iloc[-2]) and (m60.iloc[-1] < m60.iloc[-2]) and (m200.iloc[-1] < m200.iloc[-2])
             
+            # 💡 短期・長期の交差判定
+            rsi_gc = (pre_rs <= pre_rl) and (cur_rs > cur_rl)
+            rci_gc = (pre_rcs <= pre_rcl) and (cur_rcs > cur_rcl)
+            rsi_dc = (pre_rs >= pre_rl) and (cur_rs < cur_rl)
+            rci_dc = (pre_rcs >= pre_rcl) and (cur_rcs < cur_rcl)
+
             price = f"{close_df[symbol].iloc[-1]:,.0f}"
             name = TICKERS_DICT.get(symbol, symbol)
             
-            # --- 条件1: メモの数値条件判定 ---
             signal = None
-            if rsi <= 25 and rci <= -70: signal = "🟢買い推奨"
-            elif rsi >= 90 and rci >= 95: signal = "🔴空売り推奨"
-            elif rci <= -95 and rsi <= 20: signal = "🔥大底期待"
-            elif rci >= 95 and rsi >= 80: signal = "⚠️急落警戒"
-            elif rsi <= 10: signal = "🚀超売られすぎ"
-            elif (rci <= -50 and p_rci < rci) and (rsi <= 30 and p_rsi < rsi): signal = "⤴️反転シグナル"
+            # ジャックさんのメモ条件
+            if rsi_gc and rci_gc: signal = "✨同時ゴールデンクロス"
+            elif rsi_dc and rci_dc: signal = "💀同時デッドクロス"
+            elif cur_rs <= 25 and cur_rcs <= -70: signal = "🟢買い推奨(数値)"
+            elif cur_rs >= 90 and cur_rcs >= 95: signal = "🔴空売り推奨(数値)"
             
             if signal:
-                info = f"{signal} | {name} ({symbol}): RSI{rsi:.1f}/RCI{rci:.1f} [{price}円]"
-                # 標準リストに追加
+                info = f"{signal} | {name} ({symbol}): RSI(9/14){cur_rs:.1f} / RCI(9/26){cur_rcs:.1f} [{price}円]"
                 standard_reports.append(info)
                 
-                # --- 条件2: MAトレンドとの複合判定 ---
-                # 買い方向のシグナル ＋ 全MA上昇
-                if is_all_up and ("買い" in signal or "大底" in signal or "反転" in signal or "すぎ" in signal):
-                    compound_reports.append(f"📈上昇トレンド継続中: {info}")
-                # 売り方向のシグナル ＋ 全MA下降
-                elif is_all_down and ("空売り" in signal or "警戒" in signal):
-                    compound_reports.append(f"📉下降トレンド継続中: {info}")
+                # トレンド複合判定
+                if is_all_up and ("ゴールデン" in signal or "買い" in signal):
+                    compound_reports.append(f"📈上昇トレンド×買い: {info}")
+                elif is_all_down and ("デッド" in signal or "空売り" in signal):
+                    compound_reports.append(f"📉下降トレンド×売り: {info}")
         except: continue
 
-    # 📢 Discord用メッセージ構築
+    # Discord報告
     now = datetime.now().strftime('%m/%d %H:%M')
-    final_msg = f"📊 **【Jack株AI：ハイブリッド戦略速報】** ({now})\n\n"
-    
-    final_msg += "━━━ 🛠️ 条件2: MA複合選定 (トレンド一致) ━━━\n"
+    final_msg = f"📊 **【Jack株AI：短期長期クロス ＆ 2系統速報】** ({now})\n\n"
+    final_msg += "━━━ ① トレンド複合選定 (MA合致) ━━━\n"
     final_msg += "\n".join(compound_reports) if compound_reports else "（合致銘柄なし）"
-    final_msg += "\n\n"
-    
-    final_msg += "━━━ 🔍 条件1: 標準選定 (数値クリアのみ) ━━━\n"
-    final_msg += "\n".join(standard_reports) if standard_reports else "（合致銘柄なし）"
+    final_msg += "\n\n━━━ ② 標準シグナル選定 (MA不問) ━━━\n"
+    final_msg += "\n".join(standard_reports) if standard_reports else "（シグナル銘柄なし）"
 
-    # Discord送信
     for i in range(0, len(final_msg), 1900):
         DiscordWebhook(url=DISCORD_URL, content=final_msg[i:i+1900]).execute()
         time.sleep(1)
 
     # AI分析
-    if compound_reports or standard_reports:
+    if standard_reports:
         print("🤖 AI攻略本を執筆中...")
-        prompt = f"日本株プロとして分析。特に条件2の『MAトレンド一致』銘柄を本命として評価し、目標株価と上昇期待日を銘柄ごとに3行で分析せよ。\n\n{final_msg}"
+        prompt = f"日本株プロとして分析。特に✨同時GCかつ📈上昇トレンドの銘柄を最強の買い候補、💀同時DCかつ📉下降トレンドを最強の売り候補として、3行で分析せよ。\n\n{final_msg}"
         try:
             api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
             res = requests.post(api_url, headers={'Content-Type': 'application/json'}, json={"contents": [{"parts": [{"text": prompt}]}]})
             if res.status_code == 200:
                 ai_text = res.json()['candidates'][0]['content']['parts'][0]['text']
-                DiscordWebhook(url=DISCORD_URL, content=f"🤖 **【AI攻略本】**\n\n{ai_text}").execute()
+                DiscordWebhook(url=DISCORD_URL, content=f"🤖 **【AI攻略本 (短期・長期クロス解析)】**\n\n{ai_text}").execute()
         except: pass
 
-    print(f"✅ スキャン完了！ 処理時間: {time.time() - start_time:.1f}秒")
+    print(f"✅ 全工程完了！ 処理時間: {time.time() - start_time:.1f}秒")
 
 if __name__ == "__main__":
     main()
