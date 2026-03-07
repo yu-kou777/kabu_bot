@@ -26,19 +26,19 @@ def get_rsi_vectorized(df, period):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
-# 💡 RCIの符号をチャート（-3.3等）と一致させる修正版
+# 💡 RCIの計算を標準に戻しました（正負の逆転を解消）
 def get_rci_vectorized(df, period):
     def rci_func(x):
         n = len(x)
         time_rank = np.arange(1, n + 1)
-        price_rank = x.argsort().argsort() + 1
+        price_rank = pd.Series(x).rank().values
         d_sq = np.sum((time_rank - price_rank)**2)
-        return -((1 - (6 * d_sq) / (n * (n**2 - 1))) * 100)
+        return (1 - (6 * d_sq) / (n * (n**2 - 1))) * 100
     return df.rolling(window=period).apply(rci_func)
 
 def main():
     start_time = time.time()
-    print("🚀 ジャック株AI：時刻修正 ＆ 最新条件スキャン開始...")
+    print("🚀 ジャック株AI：時刻修正・RCI符号修正・最新条件スキャン開始...")
     
     TICKERS_DICT = get_prime_tickers()
     tickers_list = list(TICKERS_DICT.keys())
@@ -84,7 +84,7 @@ def main():
             rsi_gc, rci_gc = (p_rs <= p_rl and c_rs > c_rl), (p_rcs <= p_rcl and c_rcs > c_rcl)
             rsi_dc, rci_dc = (p_rs >= p_rl and c_rs < c_rl), (p_rcs >= p_rcl and c_rcs < c_rcl)
 
-            # 💡 条件3の数値を RSI 20以下 に変更
+            # 💡 条件3の数値を RSI 20以下 に更新
             num_buy = (c_rs <= 20 and c_rcs <= -70)
             num_sell = (c_rs >= 90 and c_rcs >= 95)
             sim_gc, sim_dc = (rsi_gc and rci_gc), (rsi_dc and rci_dc)
@@ -109,9 +109,9 @@ def main():
         except: continue
 
     msg = f"📊 **【Jack株AI：3系統スキャン速報】** ({datetime.now().strftime('%m/%d %H:%M')})\n"
-    msg += f"※RCI修正済み。実行スケジュールを13時/15時に変更しました。\n\n"
+    msg += f"※RCI符号修正済み。スケジュールを13時/15時に変更しました。\n\n"
     
-    msg += "━━━ 🏆 条件2: トレンド複合選定 ━━━\n"
+    msg += "━━━ 🏆 条件2: トレンド複合選定 (MA合致) ━━━\n"
     msg += "\n".join(cond2_list) if cond2_list else "（合致なし）"
     msg += "\n\n━━━ 🔍 条件1: 同時クロス ＆ 特定シグナル ━━━\n"
     has_c1 = False
@@ -121,7 +121,7 @@ def main():
             msg += f"**{g}**\n" + "\n".join(s) + "\n"
     if not has_c1: msg += "（シグナルなし）\n"
     
-    msg += "\n━━━ 📝 条件3: 数値基準クリア (RSI≦20等) ━━━\n"
+    msg += "\n━━━ 📝 条件3: 数値基準クリア (RSI≦20 / RCI≦-70等) ━━━\n"
     msg += "\n".join(cond3_list) if cond3_list else "（合致なし）"
 
     for i in range(0, len(msg), 1900):
