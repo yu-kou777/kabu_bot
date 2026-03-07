@@ -74,10 +74,11 @@ def main():
         print("❌ データの取得に失敗しました。")
         return
 
+    # 💡 買い推奨の条件を厳格化（通知数を絞るため）
     groups = {
         "🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下": [],
         "⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上": [],
-        "🟢【買い推奨】RSI30以下 ＆ RCI-50以下": [],
+        "🟢【買い推奨】RSI25以下 ＆ RCI-70以下": [],
         "🔴【空売り推奨】RSI90以上 ＆ RCI95以上": [],
         "🚀【急騰期待】RSI10以下": [],
         "⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き": []
@@ -110,8 +111,9 @@ def main():
                 groups["🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下"].append(info_str)
             elif rci >= 95 and rsi >= 80:
                 groups["⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上"].append(info_str)
-            elif rsi <= 30 and rci <= -50:
-                groups["🟢【買い推奨】RSI30以下 ＆ RCI-50以下"].append(info_str)
+            # 💡 判定ロジックも RSI<=25 かつ RCI<=-70 に変更
+            elif rsi <= 25 and rci <= -70:
+                groups["🟢【買い推奨】RSI25以下 ＆ RCI-70以下"].append(info_str)
             elif rsi >= 90 and rci >= 95:
                 groups["🔴【空売り推奨】RSI90以上 ＆ RCI95以上"].append(info_str)
             elif rsi <= 10:
@@ -138,7 +140,6 @@ def main():
         data_msg += "現在、指定の強力なシグナルと出来高条件に合致する銘柄はありません。\n"
 
     try:
-        # 分割送信時のヘッダー追加処理
         chunk_size = 1800
         chunks = [data_msg[i:i+chunk_size] for i in range(0, len(data_msg), chunk_size)]
         total_chunks = len(chunks)
@@ -146,7 +147,7 @@ def main():
         for idx, chunk in enumerate(chunks):
             header = ""
             if total_chunks > 1:
-                header = f"【速報の続き ({idx+1}/{total_chunks})】\n" if idx > 0 else f"【速報 (1/{total_chunks})】\n"
+                header = f"【速報 ({idx+1}/{total_chunks})】\n"
             
             DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
             time.sleep(1)
@@ -159,8 +160,7 @@ def main():
         prompt = f"日本株プロとしてテクニカル分析せよ。以下のシグナル点灯銘柄（出来高選抜済み）について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
         
         try:
-            # 💡 404対策：最も安定している v1 エンドポイントへ変更
-            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
             headers = {'Content-Type': 'application/json'}
             data = {"contents": [{"parts": [{"text": prompt}]}]}
             response = requests.post(url, headers=headers, json=data)
@@ -175,12 +175,31 @@ def main():
                 for idx, chunk in enumerate(ai_chunks):
                     header = ""
                     if ai_total > 1:
-                        header = f"【AI攻略本の続き ({idx+1}/{ai_total})】\n" if idx > 0 else f"【AI攻略本 (1/{ai_total})】\n"
+                        header = f"【AI攻略本 ({idx+1}/{ai_total})】\n"
                     DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
                     time.sleep(1)
                 print("✅ 第二陣：AI攻略本の送信完了！")
             else:
-                print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code})")
+                # 💡 404エラーが出た場合のバックアップ（旧型・安定モデルに切り替え）
+                print(f"⚠️ gemini-1.5-flash でエラー (コード: {response.status_code})。安定版(gemini-pro)で再試行します...")
+                url_fallback = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_KEY}"
+                response_fb = requests.post(url_fallback, headers=headers, json=data)
+                
+                if response_fb.status_code == 200:
+                    ai_analysis = response_fb.json()['candidates'][0]['content']['parts'][0]['text']
+                    ai_msg = f"🤖 **【AI攻略本 (安定版)】**\n\n{ai_analysis}"
+                    
+                    ai_chunks = [ai_msg[i:i+chunk_size] for i in range(0, len(ai_msg), chunk_size)]
+                    ai_total = len(ai_chunks)
+                    for idx, chunk in enumerate(ai_chunks):
+                        header = ""
+                        if ai_total > 1:
+                            header = f"【AI攻略本 ({idx+1}/{ai_total})】\n"
+                        DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
+                        time.sleep(1)
+                    print("✅ 第二陣：AI攻略本(安定版)の送信完了！")
+                else:
+                    print(f"⚠️ AIは完全に沈黙しました (エラーコード: {response_fb.status_code})")
         except Exception as e:
             print(f"⚠️ AI通信エラー: {e}")
     else:
