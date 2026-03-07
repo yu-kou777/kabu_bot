@@ -43,19 +43,20 @@ def calculate_rci(series, period=9):
     return rci
 
 def main():
-    print("🚀 ジャック株AI：プライム市場全体スキャン開始...")
+    print("🚀 ジャック株AI：プライム市場全体トレンドスキャン開始...")
     
     TICKERS = get_prime_tickers()
     tickers_list = list(TICKERS.keys())
     
-    print("📡 株価データと出来高を分割ダウンロード中...")
+    print("📡 株価・出来高データを取得中 (MA200計算のため2年分取得)...")
     close_prices_list = []
     volumes_list = []
-    chunk_size = 200
+    chunk_size = 150 # 安定のため少し絞る
     
     for i in range(0, len(tickers_list), chunk_size):
         chunk = tickers_list[i:i+chunk_size]
-        data = yf.download(chunk, period="6mo", threads=True, progress=False)
+        # 💡 MA200のために2年分(2y)取得
+        data = yf.download(chunk, period="2y", threads=True, progress=False)
         
         if not data.empty:
             if isinstance(data.columns, pd.MultiIndex):
@@ -74,17 +75,17 @@ def main():
         print("❌ データの取得に失敗しました。")
         return
 
-    # 💡 買い推奨の条件を厳格化（通知数を絞るため）
-    groups = {
-        "🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下": [],
-        "⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上": [],
-        "🟢【買い推奨】RSI25以下 ＆ RCI-70以下": [],
-        "🔴【空売り推奨】RSI90以上 ＆ RCI95以上": [],
-        "🚀【急騰期待】RSI10以下": [],
-        "⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き": []
+    # シグナルグループ用辞書（内部にMAトレンド別リストを保持）
+    signal_groups = {
+        "🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下": {"up": [], "down": [], "mixed": []},
+        "⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上": {"up": [], "down": [], "mixed": []},
+        "🟢【買い推奨】RSI25以下 ＆ RCI-70以下": {"up": [], "down": [], "mixed": []},
+        "🔴【空売り推奨】RSI90以上 ＆ RCI95以上": {"up": [], "down": [], "mixed": []},
+        "🚀【急騰期待】RSI10以下": {"up": [], "down": [], "mixed": []},
+        "⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き": {"up": [], "down": [], "mixed": []}
     }
     
-    print("⚙️ テクニカル指標と出来高フィルターを計算中...")
+    print("⚙️ 指標計算とMAトレンド判別中...")
     for symbol, name in TICKERS.items():
         try:
             if symbol not in close_prices.columns or symbol not in volumes.columns: continue
@@ -92,118 +93,94 @@ def main():
             series_close = close_prices[symbol].dropna()
             series_vol = volumes[symbol].dropna()
             
-            if len(series_close) < 15 or len(series_vol) < 5: continue
+            if len(series_close) < 201 or len(series_vol) < 5: continue
             
+            # 出来高フィルター
             vol_ma5 = series_vol.tail(5).mean()
-            if vol_ma5 < MIN_VOLUME_MA5:
-                continue
+            if vol_ma5 < MIN_VOLUME_MA5: continue
             
+            # RSI/RCI計算
             rsi = round(calculate_rsi(series_close, 14).iloc[-1], 1)
             rci = round(calculate_rci(series_close, 9)[-1], 1)
             prev_rsi = round(calculate_rsi(series_close, 14).iloc[-2], 1)
             prev_rci = round(calculate_rci(series_close, 9)[-2], 1)
+            
+            # 💡 移動平均線(MA)計算とトレンド判定
+            ma20 = series_close.rolling(window=20).mean()
+            ma60 = series_close.rolling(window=60).mean()
+            ma200 = series_close.rolling(window=200).mean()
+            
+            # 当日と前日の傾きチェック
+            is_up = (ma20.iloc[-1] > ma20.iloc[-2]) and (ma60.iloc[-1] > ma60.iloc[-2]) and (ma200.iloc[-1] > ma200.iloc[-2])
+            is_down = (ma20.iloc[-1] < ma20.iloc[-2]) and (ma60.iloc[-1] < ma60.iloc[-2]) and (ma200.iloc[-1] < ma200.iloc[-2])
+            
+            trend_key = "mixed"
+            if is_up: trend_key = "up"
+            elif is_down: trend_key = "down"
+            
             price = f"{series_close.iloc[-1]:,.0f}"
-            vol_str = f"{vol_ma5/10000:.0f}万株"
+            info_str = f"  ・{name} ({symbol}): RSI {rsi} / RCI {rci} [{price}円]"
             
-            info_str = f"  ・{name} ({symbol}): RSI {rsi} / RCI {rci} [{price}円 | 平均出来高 {vol_str}]"
+            # 条件合致の振り分け
+            target_group = None
+            if rci <= -95 and rsi <= 20: target_group = "🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下"
+            elif rci >= 95 and rsi >= 80: target_group = "⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上"
+            elif rsi <= 25 and rci <= -70: target_group = "🟢【買い推奨】RSI25以下 ＆ RCI-70以下"
+            elif rsi >= 90 and rci >= 95: target_group = "🔴【空売り推奨】RSI90以上 ＆ RCI95以上"
+            elif rsi <= 10: target_group = "🚀【急騰期待】RSI10以下"
+            elif (rci <= -50 and prev_rci < rci) and (rsi <= 30 and prev_rsi < rsi): target_group = "⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き"
             
-            if rci <= -95 and rsi <= 20:
-                groups["🔥【大底急騰期待】RCI最低値圏(-95以下) ＆ RSI20以下"].append(info_str)
-            elif rci >= 95 and rsi >= 80:
-                groups["⚠️【急落警戒】RCI最高値圏(95以上) ＆ RSI80以上"].append(info_str)
-            # 💡 判定ロジックも RSI<=25 かつ RCI<=-70 に変更
-            elif rsi <= 25 and rci <= -70:
-                groups["🟢【買い推奨】RSI25以下 ＆ RCI-70以下"].append(info_str)
-            elif rsi >= 90 and rci >= 95:
-                groups["🔴【空売り推奨】RSI90以上 ＆ RCI95以上"].append(info_str)
-            elif rsi <= 10:
-                groups["🚀【急騰期待】RSI10以下"].append(info_str)
-            elif (rci <= -50 and prev_rci < rci) and (rsi <= 30 and prev_rsi < rsi):
-                groups["⤴️【反転シグナル】RSI・RCI同時に売られすぎ圏から上向き"].append(info_str)
+            if target_group:
+                signal_groups[target_group][trend_key].append(info_str)
         except:
             pass
 
+    # Discord用メッセージ構築
     now_str = datetime.now().strftime('%m/%d %H:%M')
-    data_msg = f"📊 **【Jack株AI プライム選抜 スキャン速報】** ({now_str})\n"
-    data_msg += f"※流動性フィルター：5日平均出来高 {MIN_VOLUME_MA5/10000:.0f}万株以上\n\n"
+    data_msg = f"📊 **【Jack株AI プライム・MAトレンド分析】** ({now_str})\n"
+    data_msg += f"※MA判定：20/60/200日線がすべて上昇または下降\n\n"
     has_signals = False
     
-    for group_name, stocks in groups.items():
-        if stocks:
+    for sig_name, trends in signal_groups.items():
+        if any(trends.values()):
             has_signals = True
-            data_msg += f"**{group_name}** ({len(stocks)}銘柄)\n"
-            for stock in stocks:
-                data_msg += f"{stock}\n"
+            data_msg += f"**{sig_name}**\n"
+            
+            if trends["up"]:
+                data_msg += " 📈 [全MA上昇中/強い上昇]\n" + "\n".join(trends["up"]) + "\n"
+            if trends["down"]:
+                data_msg += " 📉 [全MA下降中/強い下降]\n" + "\n".join(trends["down"]) + "\n"
+            if trends["mixed"]:
+                data_msg += " ➖ [MAトレンド混在]\n" + "\n".join(trends["mixed"]) + "\n"
             data_msg += "\n"
             
     if not has_signals:
-        data_msg += "現在、指定の強力なシグナルと出来高条件に合致する銘柄はありません。\n"
+        data_msg += "現在、シグナルに合致する銘柄はありません。\n"
 
+    # Discord送信（分割）
     try:
         chunk_size = 1800
         chunks = [data_msg[i:i+chunk_size] for i in range(0, len(data_msg), chunk_size)]
-        total_chunks = len(chunks)
-        
+        total = len(chunks)
         for idx, chunk in enumerate(chunks):
-            header = ""
-            if total_chunks > 1:
-                header = f"【速報 ({idx+1}/{total_chunks})】\n"
-            
+            header = f"【速報 ({idx+1}/{total})】\n" if total > 1 else ""
             DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
             time.sleep(1)
-        print("✅ 第一陣：戦略シグナル速報の送信完了！")
+        print("✅ 送信完了！")
     except Exception as e:
-        print(f"❌ 速報の送信に失敗: {e}")
+        print(f"❌ 送信失敗: {e}")
 
+    # AI分析（シグナル銘柄のみ）
     if has_signals:
-        print("🤖 AIがシグナル抽出銘柄の攻略本を執筆中...")
-        prompt = f"日本株プロとしてテクニカル分析せよ。以下のシグナル点灯銘柄（出来高選抜済み）について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
-        
+        prompt = f"日本株プロとして分析せよ。特に📈（全MA上昇）で逆張りシグナルが出ている銘柄を「底打ち成功」として高く評価し、銘柄ごとに3行で分析せよ。\n\n{data_msg}"
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-            headers = {'Content-Type': 'application/json'}
-            data = {"contents": [{"parts": [{"text": prompt}]}]}
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code == 200:
-                ai_analysis = response.json()['candidates'][0]['content']['parts'][0]['text']
-                ai_msg = f"🤖 **【AI攻略本 (流動性厳選)】**\n\n{ai_analysis}"
-                
-                ai_chunks = [ai_msg[i:i+chunk_size] for i in range(0, len(ai_msg), chunk_size)]
-                ai_total = len(ai_chunks)
-                
-                for idx, chunk in enumerate(ai_chunks):
-                    header = ""
-                    if ai_total > 1:
-                        header = f"【AI攻略本 ({idx+1}/{ai_total})】\n"
-                    DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
-                    time.sleep(1)
-                print("✅ 第二陣：AI攻略本の送信完了！")
-            else:
-                # 💡 404エラーが出た場合のバックアップ（旧型・安定モデルに切り替え）
-                print(f"⚠️ gemini-1.5-flash でエラー (コード: {response.status_code})。安定版(gemini-pro)で再試行します...")
-                url_fallback = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_KEY}"
-                response_fb = requests.post(url_fallback, headers=headers, json=data)
-                
-                if response_fb.status_code == 200:
-                    ai_analysis = response_fb.json()['candidates'][0]['content']['parts'][0]['text']
-                    ai_msg = f"🤖 **【AI攻略本 (安定版)】**\n\n{ai_analysis}"
-                    
-                    ai_chunks = [ai_msg[i:i+chunk_size] for i in range(0, len(ai_msg), chunk_size)]
-                    ai_total = len(ai_chunks)
-                    for idx, chunk in enumerate(ai_chunks):
-                        header = ""
-                        if ai_total > 1:
-                            header = f"【AI攻略本 ({idx+1}/{ai_total})】\n"
-                        DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
-                        time.sleep(1)
-                    print("✅ 第二陣：AI攻略本(安定版)の送信完了！")
-                else:
-                    print(f"⚠️ AIは完全に沈黙しました (エラーコード: {response_fb.status_code})")
-        except Exception as e:
-            print(f"⚠️ AI通信エラー: {e}")
-    else:
-        print("💤 シグナル銘柄がないため、AI分析はスキップしました。")
+            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+            res = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"parts": [{"text": prompt}]}]})
+            if res.status_code == 200:
+                ai_text = res.json()['candidates'][0]['content']['parts'][0]['text']
+                DiscordWebhook(url=DISCORD_URL, content=f"🤖 **【AI攻略本 (トレンド選別)】**\n\n{ai_text}").execute()
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
