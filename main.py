@@ -138,8 +138,17 @@ def main():
         data_msg += "現在、指定の強力なシグナルと出来高条件に合致する銘柄はありません。\n"
 
     try:
-        for i in range(0, len(data_msg), 1900):
-            DiscordWebhook(url=DISCORD_URL, content=data_msg[i:i+1900]).execute()
+        # 分割送信時のヘッダー追加処理
+        chunk_size = 1800
+        chunks = [data_msg[i:i+chunk_size] for i in range(0, len(data_msg), chunk_size)]
+        total_chunks = len(chunks)
+        
+        for idx, chunk in enumerate(chunks):
+            header = ""
+            if total_chunks > 1:
+                header = f"【速報の続き ({idx+1}/{total_chunks})】\n" if idx > 0 else f"【速報 (1/{total_chunks})】\n"
+            
+            DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
             time.sleep(1)
         print("✅ 第一陣：戦略シグナル速報の送信完了！")
     except Exception as e:
@@ -150,8 +159,8 @@ def main():
         prompt = f"日本株プロとしてテクニカル分析せよ。以下のシグナル点灯銘柄（出来高選抜済み）について、変動要因、上昇期待日、目標株価を銘柄ごとに3行で簡潔に分析せよ。\n\n{data_msg}"
         
         try:
-            # 💡 URLを修正し、最新のモデル名「gemini-1.5-flash-latest」を指定
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
+            # 💡 404対策：最も安定している v1 エンドポイントへ変更
+            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
             headers = {'Content-Type': 'application/json'}
             data = {"contents": [{"parts": [{"text": prompt}]}]}
             response = requests.post(url, headers=headers, json=data)
@@ -160,14 +169,20 @@ def main():
                 ai_analysis = response.json()['candidates'][0]['content']['parts'][0]['text']
                 ai_msg = f"🤖 **【AI攻略本 (流動性厳選)】**\n\n{ai_analysis}"
                 
-                for i in range(0, len(ai_msg), 1900):
-                    DiscordWebhook(url=DISCORD_URL, content=ai_msg[i:i+1900]).execute()
+                ai_chunks = [ai_msg[i:i+chunk_size] for i in range(0, len(ai_msg), chunk_size)]
+                ai_total = len(ai_chunks)
+                
+                for idx, chunk in enumerate(ai_chunks):
+                    header = ""
+                    if ai_total > 1:
+                        header = f"【AI攻略本の続き ({idx+1}/{ai_total})】\n" if idx > 0 else f"【AI攻略本 (1/{ai_total})】\n"
+                    DiscordWebhook(url=DISCORD_URL, content=header + chunk).execute()
                     time.sleep(1)
                 print("✅ 第二陣：AI攻略本の送信完了！")
             else:
-                print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code} - {response.text})")
+                print(f"⚠️ AIは裏方で沈黙しました (エラーコード: {response.status_code})")
         except Exception as e:
-            print(f"⚠️ AI通信エラーのため裏方で処理を終了します: {e}")
+            print(f"⚠️ AI通信エラー: {e}")
     else:
         print("💤 シグナル銘柄がないため、AI分析はスキップしました。")
 
