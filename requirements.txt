@@ -3,3 +3,4 @@ pandas
 requests
 discord-webhook
 numpy
+xlrd
