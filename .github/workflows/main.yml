@@ -1,8 +1,8 @@
 name: Jack_Scheduled_Scan
 on:
   schedule:
-    - cron: '00 04 * * *' # 日本時間 13:00
-    - cron: '00 06 * * *' # 日本時間 15:00
+    - cron: '00 04 * * 1-5' # 月〜金 日本時間 13:00
+    - cron: '00 06 * * 1-5' # 月〜金 日本時間 15:00
   workflow_dispatch:
 
 jobs:
