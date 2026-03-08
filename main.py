@@ -5,11 +5,25 @@ from discord_webhook import DiscordWebhook
 import time
 import numpy as np
 from datetime import datetime
+import pytz
+import jpholiday
 
 # --- 基本設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_MA5 = 300000 
+
+def is_market_holiday():
+    """市場が休み（土日・祝日）かどうかを判定する"""
+    tz = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(tz)
+    # 土日判定
+    if now.weekday() >= 5:
+        return True
+    # 日本の祝日判定
+    if jpholiday.is_holiday(now.date()):
+        return True
+    return False
 
 def get_prime_tickers():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
@@ -26,7 +40,6 @@ def get_rsi_vectorized(df, period):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
-# 💡 RCIの計算を標準に戻しました（正負の逆転を解消）
 def get_rci_vectorized(df, period):
     def rci_func(x):
         n = len(x)
@@ -37,13 +50,18 @@ def get_rci_vectorized(df, period):
     return df.rolling(window=period).apply(rci_func)
 
 def main():
+    # 💡 冒頭で休日チェック
+    if is_market_holiday():
+        print("☕ 今日は日本市場が休み（土日・祝日）のため、スキャンを停止します。")
+        return
+
     start_time = time.time()
-    print("🚀 ジャック株AI：時刻修正・RCI符号修正・最新条件スキャン開始...")
+    print("🚀 ジャック株AI：最新条件・休日判定スキャン開始...")
     
     TICKERS_DICT = get_prime_tickers()
     tickers_list = list(TICKERS_DICT.keys())
     
-    # 📡 データ取得
+    print(f"📡 {len(tickers_list)}銘柄のデータを取得中...")
     all_close, all_volume = [], []
     chunk_size = 400
     for i in range(0, len(tickers_list), chunk_size):
@@ -57,16 +75,13 @@ def main():
     close_df = pd.concat(all_close, axis=1)
     volume_df = pd.concat(all_volume, axis=1)
 
-    # ⚙️ 指標計算
     rsi_s, rsi_l = get_rsi_vectorized(close_df, 9), get_rsi_vectorized(close_df, 14)
     rci_s, rci_l = get_rci_vectorized(close_df, 9), get_rci_vectorized(close_df, 26)
     ma20, ma60, ma200 = close_df.rolling(20).mean(), close_df.rolling(60).mean(), close_df.rolling(200).mean()
     vol_ma5 = volume_df.rolling(5).mean()
 
-    # 通知用
-    cond2_list = []
+    cond2_list, cond3_list = [], []
     cond1_groups = {"✨同時GC": [], "💀同時DC": [], "🚀RSI10以下": [], "🔥大底": [], "⚠️急落": []}
-    cond3_list = []
 
     for symbol in close_df.columns:
         try:
@@ -84,7 +99,6 @@ def main():
             rsi_gc, rci_gc = (p_rs <= p_rl and c_rs > c_rl), (p_rcs <= p_rcl and c_rcs > c_rcl)
             rsi_dc, rci_dc = (p_rs >= p_rl and c_rs < c_rl), (p_rcs >= p_rcl and c_rcs < c_rcl)
 
-            # 💡 条件3の数値を RSI 20以下 に更新
             num_buy = (c_rs <= 20 and c_rcs <= -70)
             num_sell = (c_rs >= 90 and c_rcs >= 95)
             sim_gc, sim_dc = (rsi_gc and rci_gc), (rsi_dc and rci_dc)
@@ -105,24 +119,20 @@ def main():
             if (num_buy or num_sell) and not (sim_gc or sim_dc):
                 prefix = "🟢買推奨" if num_buy else "🔴売推奨"
                 cond3_list.append(f"{prefix}: {info}")
-
         except: continue
 
-    msg = f"📊 **【Jack株AI：3系統スキャン速報】** ({datetime.now().strftime('%m/%d %H:%M')})\n"
-    msg += f"※RCI符号修正済み。スケジュールを13時/15時に変更しました。\n\n"
+    msg = f"📊 **【Jack株AI：3系統スキャン速報】** ({datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%m/%d %H:%M')})\n"
+    msg += f"※土日・祝日は自動でスキップされる設定です\n\n"
     
-    msg += "━━━ 🏆 条件2: トレンド複合選定 (MA合致) ━━━\n"
-    msg += "\n".join(cond2_list) if cond2_list else "（合致なし）"
+    msg += "━━━ 🏆 条件2: トレンド複合選定 ━━━\n" + ("\n".join(cond2_list) if cond2_list else "（合致なし）")
     msg += "\n\n━━━ 🔍 条件1: 同時クロス ＆ 特定シグナル ━━━\n"
     has_c1 = False
     for g, s in cond1_groups.items():
         if s:
-            has_c1 = True
-            msg += f"**{g}**\n" + "\n".join(s) + "\n"
+            has_c1, msg = True, msg + f"**{g}**\n" + "\n".join(s) + "\n"
     if not has_c1: msg += "（シグナルなし）\n"
     
-    msg += "\n━━━ 📝 条件3: 数値基準クリア (RSI≦20 / RCI≦-70等) ━━━\n"
-    msg += "\n".join(cond3_list) if cond3_list else "（合致なし）"
+    msg += "\n━━━ 📝 条件3: 数値基準クリア (クロスなし) ━━━\n" + ("\n".join(cond3_list) if cond3_list else "（合致なし）")
 
     for i in range(0, len(msg), 1900):
         DiscordWebhook(url=DISCORD_URL, content=msg[i:i+1900]).execute()
