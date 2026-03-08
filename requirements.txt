@@ -1,6 +1,8 @@
-yfinance>=0.2.50
+yfinance
 pandas
 requests
 discord-webhook
 numpy
+pytz
+jpholiday
 xlrd
