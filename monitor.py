@@ -9,11 +9,11 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 継承設定 ＆ 定数 ---
+# --- ⚙️ 継承設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_MA5 = 300000 
-PRICE_MIN = 3000 # 株価3000円以上
+PRICE_MIN = 3000 
 
 def is_market_holiday():
     """日本市場の休日・祝日判定"""
@@ -26,9 +26,11 @@ def is_market_holiday():
 def calculate_vwap(df_intraday):
     """当日の5分足からVWAPを算出"""
     if df_intraday.empty: return 0
-    c = df_intraday['Close'].iloc[:,0] if isinstance(df_intraday['Close'], pd.DataFrame) else df_intraday['Close']
-    v = df_intraday['Volume'].iloc[:,0] if isinstance(df_intraday['Volume'], pd.DataFrame) else df_intraday['Volume']
-    return (c * v).sum() / v.sum()
+    try:
+        c = df_intraday['Close'].iloc[:,0] if isinstance(df_intraday['Close'], pd.DataFrame) else df_intraday['Close']
+        v = df_intraday['Volume'].iloc[:,0] if isinstance(df_intraday['Volume'], pd.DataFrame) else df_intraday['Volume']
+        return (c * v).sum() / v.sum()
+    except: return 0
 
 def get_prime_tickers():
     """JPXからプライム銘柄を取得"""
@@ -57,30 +59,20 @@ def get_rci(df, period=9):
 
 def get_ai_prediction(hits_data):
     """Gemini APIによる翌日攻略の予報"""
-    prompt = f"""
-    あなたはプロのアナリストです。以下のデータから翌日のデイトレ・スイングの攻略本を作成してください。
-    1. 変動要因（金、指数、為替など何に連動して動くか）
-    2. トレンドの向きと強さ
-    3. 次の上昇・反転予想日
-    4. 目標価格
-    5. いつデッドクロスがあったか（データにあれば）
-    
-    【対象データ】
-    {hits_data}
-    """
+    prompt = f"日本株プロとして分析。条件を精査し、上昇予想日、目標価格、変動要因を詳細に解説せよ。\n\n{hits_data}"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         res = requests.post(url, json=payload, timeout=30)
         return res.json()['candidates'][0]['content']['parts'][0]['text']
-    except: return "AI分析に失敗しました。"
+    except: return "AI分析エラー"
 
 def main():
     if is_market_holiday():
-        print("☕ 本日は休場です。スキャンをスキップします。")
+        print("☕ 本日は休場です。")
         return
 
-    print("🚀 ジャック株AI：プライム3000+ & VWAPスキャン開始...")
+    print("🚀 背景スキャン開始...")
     name_map = get_prime_tickers()
     tickers = list(name_map.keys())
     
@@ -105,29 +97,22 @@ def main():
 
                 curr_p, rsi, rci = c.iloc[-1], rsi_s[symbol].iloc[-1], rci_s[symbol].iloc[-1]
                 
-                # 💡 シグナル判定
-                is_hit = (rci <= -80 or rci >= 85 or rsi <= 25 or rsi >= 75)
-                
-                if is_hit:
-                    # VWAP取得（5分足）
+                # シグナル判定
+                if (rci <= -80 or rci >= 85 or rsi <= 25 or rsi >= 75):
+                    # VWAP取得（当日の5分足）
                     df_intra = yf.download(symbol, period="1d", interval="5m", progress=False)
                     vwap = calculate_vwap(df_intra)
-                    dc_info = "直近あり" if (ma5[symbol].iloc[-1] < ma25[symbol].iloc[-1] and ma5[symbol].iloc[-2] >= ma25[symbol].iloc[-2]) else "なし"
+                    dc_info = "あり" if (ma5[symbol].iloc[-1] < ma25[symbol].iloc[-1] and ma5[symbol].iloc[-2] >= ma25[symbol].iloc[-2]) else "なし"
                     
                     all_hits.append(f"・{name_map[symbol]} ({symbol}): 価格{curr_p:,.1f}/VWAP{vwap:.1f}/RSI{rsi:.1f}/RCI{rci:.1f} [DC:{dc_info}]")
             except: continue
         time.sleep(2)
 
     if all_hits:
-        msg_header = f"📊 **【Jack株AI：スキャン速報】** {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%m/%d %H:%M')}\n"
-        hits_text = "\n".join(all_hits)
-        requests.post(DISCORD_URL, json={"content": msg_header + hits_text[:1800]})
-        
-        # AI分析
-        ai_msg = get_ai_prediction(hits_text)
-        requests.post(DISCORD_URL, json={"content": f"🤖 **【AI翌日攻略本】**\n\n{ai_msg[:1900]}"})
-    else:
-        print("本日の条件合致銘柄はありませんでした。")
+        msg = f"📊 **【Jack株AI：スキャン速報】**\n" + "\n".join(all_hits)
+        requests.post(DISCORD_URL, json={"content": msg[:1900]})
+        ai_msg = get_ai_prediction(msg)
+        requests.post(DISCORD_URL, json={"content": f"🤖 **【AI攻略本】**\n\n{ai_msg[:1900]}"})
 
 if __name__ == "__main__":
     main()
