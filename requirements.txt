@@ -1,8 +1,9 @@
+streamlit
 yfinance
 pandas
 requests
-discord-webhook
+xlrd>=2.0.1
 numpy
-pytz
+openpyxl
 jpholiday
-xlrd
+pytz
