@@ -9,32 +9,20 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 継承設定 ---
+# --- 設定 ---
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_5D = 300000 
 PRICE_MIN = 3000 
 
 def is_market_holiday():
-    """日本市場の休日・祝日判定"""
     tz = pytz.timezone('Asia/Tokyo')
     now = datetime.now(tz)
-    # 土日(5,6) または 祝日
     if now.weekday() >= 5 or jpholiday.is_holiday(now.date()):
         return True
     return False
 
-def calculate_vwap(df):
-    """VWAP算出"""
-    if df.empty: return 0
-    try:
-        c = df['Close'].iloc[:,0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-        v = df['Volume'].iloc[:,0] if isinstance(df['Volume'], pd.DataFrame) else df['Volume']
-        return (c * v).sum() / v.sum()
-    except: return 0
-
 def get_prime_tickers():
-    """JPXからプライム銘柄リスト取得"""
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -42,15 +30,18 @@ def get_prime_tickers():
         df = pd.read_excel(io.BytesIO(res.content), engine='xlrd')
         prime_df = df[df['市場・商品区分'].str.contains('プライム', na=False)]
         return {str(row['コード']) + ".T": row['銘柄名'] for _, row in prime_df.iterrows()}
-    except Exception as e:
-        print(f"JPX Error: {e}")
-        return {"8035.T": "東エレク", "9984.T": "SBG", "7203.T": "トヨタ", "6920.T": "レーザーテク"}
+    except:
+        return {
+            "8035.T": "東エレク", "9984.T": "SBG", "7203.T": "トヨタ", "6920.T": "レーザーテク",
+            "6857.T": "アドバンテ", "6146.T": "ディスコ", "6723.T": "ルネサス", "7974.T": "任天堂",
+            "4063.T": "信越化", "8306.T": "三菱UFJ", "9101.T": "日本郵船", "9020.T": "JR東日本"
+        }
 
 def calculate_rsi(df, period=14):
     delta = df.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    return 100 - (100 / (1 + (gain / loss)))
+    return 100 - (100 / (1 + (gain / loss + 1e-9)))
 
 def calculate_rci(df, period=9):
     def rci_logic(x):
@@ -60,64 +51,59 @@ def calculate_rci(df, period=9):
     return df.rolling(window=period).apply(rci_logic)
 
 def get_ai_insight(msg_text):
-    """Gemini AIによる攻略本生成"""
-    prompt = f"日本株プロとして分析。以下のデータから翌日のデイトレ準備ができる攻略本（注目点、上昇予想日、目標価格）を詳細に作成せよ。\n\n{msg_text}"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_KEY}"
+    prompt = f"日本株のプロとして以下の検知された銘柄データを分析してください。翌日のデイトレ・スイングに向けた攻略本（各銘柄の連動要因、トレンド状況、上昇予想日、目標価格）を詳細に作成してください。\n\n{msg_text}"
+    # 💡 友幸さんのキーで確実に動く安定版(1.5-flash)に変更しました
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    headers = {'Content-Type': 'application/json'}
     try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-        return res.json()['candidates'][0]['content']['parts'][0]['text']
-    except: return "AI分析に失敗しました。"
+        res = requests.post(url, headers=headers, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
+        if res.status_code == 200:
+            return res.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return f"AIエラー: {res.status_code}"
+    except Exception as e: 
+        return f"AI通信エラー: {e}"
 
 def main():
     if is_market_holiday():
-        print("☕ 本日は休場です。")
+        print("☕ 本日は休場です。処理を終了します。")
         return
 
-    print("🚀 背景監視スキャンを開始...")
+    print("🚀 スキャン開始...")
     name_map = get_prime_tickers()
     tickers = list(name_map.keys())
     
     hits = []
-    # 200銘柄ずつのバッチ処理
-    chunk_size = 200
+    chunk_size = 100 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
-            data = yf.download(chunk, period="6mo", interval="1d", progress=False)
+            data = yf.download(chunk, period="6mo", interval="1d", progress=False, threads=False)
             close_df = data['Close'] if 'Close' in data else data
-            vol_df = data['Volume'] if 'Volume' in data else None
             
-            rsi_s = calculate_rsi(close_df, 14)
-            rci_s = calculate_rci(close_df, 9)
-            ma5 = close_df.rolling(5).mean()
-            ma25 = close_df.rolling(25).mean()
-
             for s in chunk:
                 try:
                     c = close_df[s].dropna()
                     if c.empty or c.iloc[-1] < PRICE_MIN: continue
-                    if vol_df is not None and vol_df[s].tail(5).mean() < MIN_VOLUME_5D: continue
-
-                    p, rsi, rci = c.iloc[-1], rsi_s[s].iloc[-1], rci_s[s].iloc[-1]
                     
-                    # 💡 シグナル検知 (RCI底打ち・過熱、またはRSI)
+                    p, rsi, rci = c.iloc[-1], calculate_rsi(c).iloc[-1], calculate_rci(c).iloc[-1]
+                    
                     if rci <= -80 or rci >= 85 or rsi <= 25 or rsi >= 75:
-                        df_intra = yf.download(s, period="1d", interval="5m", progress=False)
-                        vwap = calculate_vwap(df_intra)
-                        dc = "あり" if (ma5[s].iloc[-1] < ma25[s].iloc[-1] and ma5[s].iloc[-2] >= ma25[s].iloc[-2]) else "なし"
-                        hits.append(f"・{name_map[s]} ({s}): {p:,.1f}円 / VWAP:{vwap:.1f} / RSI:{rsi:.1f} / RCI:{rci:.1f} [DC:{dc}]")
+                        hits.append(f"・{name_map[s]} ({s}): {p:,.1f}円 / RSI:{rsi:.1f} / RCI:{rci:.1f}")
                 except: continue
         except: continue
-        time.sleep(2)
+        time.sleep(1)
 
     if hits:
-        summary = f"📊 **【Jack株AI：スキャン速報】**\n" + "\n".join(hits[:15]) # 上位15件
+        # ディスコードの文字数制限に引っかからないように調整
+        summary = f"📊 **【Jack株AI：スキャン速報】**\n" + "\n".join(hits[:15])
         requests.post(DISCORD_URL, json={"content": summary[:1900]})
         
+        # AI分析を実行
         ai_msg = get_ai_insight(summary)
-        requests.post(DISCORD_URL, json={"content": f"🤖 **【AI翌日攻略本】**\n\n{ai_msg[:1900]}"})
+        requests.post(DISCORD_URL, json={"content": f"🤖 **【AI攻略予報】**\n\n{ai_msg[:1900]}"})
     else:
-        print("合致なし")
+        print("条件合致なし")
 
 if __name__ == "__main__":
     main()
