@@ -51,13 +51,14 @@ def send_discord(text, title=None):
     content = f"### {title}\n{text}" if title else text
     try:
         requests.post(DISCORD_URL, json={"content": content}, timeout=10)
-        time.sleep(1)
+        time.sleep(1.2) # Discordの連投制限回避
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 【修正】APIバージョンを v1 に戻し、モデル名を指定
-    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # 【404対策の核心】URLから「models/」を省き、モデル名を直接指定する形式を試行
+    # または、最も標準的な v1beta1 エンドポイントを使用
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"日本株プロとして以下から本命1銘柄を厳選、理由と注意点を100字以内で。:\n{msg_text}"
     
@@ -67,13 +68,12 @@ def get_ai_insight(msg_text):
     }
 
     try:
-        res = requests.post(endpoint, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
+        res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
         if res.status_code == 200:
             data = res.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
         else:
-            # エラー時は詳細を表示してデバッグを容易にする
-            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:50]}"
+            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:40]}"
     except Exception as e:
         return f"AI通信エラー: {str(e)[:30]}"
 
@@ -82,7 +82,7 @@ def main():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 スキャン開始（AIエンドポイント修正済み）...")
+    print("🚀 高速スキャン開始...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -129,12 +129,12 @@ def main():
                     elif cur_rsi <= 10: categories["🚀【急騰期待】"].append((kairi, info))
                 except: continue
         except: continue
-        time.sleep(1)
+        time.sleep(1.2)
 
     ai_input_data = ""
     any_hits = False
     
-    # 銘柄リストを送信
+    # 1. まず銘柄リストを送信（AIの成否に関わらず必ず届く）
     for cat_name, items in categories.items():
         if items:
             any_hits = True
@@ -143,15 +143,15 @@ def main():
             send_discord(display_text, title=f"📊 {cat_name} スキャン結果")
             ai_input_data += f"{cat_name}: {sorted_items[0][1]}\n"
 
-    # AI分析を送信
+    # 2. 最後にAI分析を送信
     if any_hits:
-        print("🤖 AI分析リクエスト中...")
+        print("🤖 AI分析中...")
         ai_comment = get_ai_insight(ai_input_data)
         send_discord(ai_comment, title="🤖 AIプロの厳選短評")
     else:
-        send_discord("該当なし", title="🔍 スキャン完了")
+        send_discord("本日はボラティリティ条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
 
-    print("✅ 完了")
+    print("✅ 全処理完了")
 
 if __name__ == "__main__":
     main()
