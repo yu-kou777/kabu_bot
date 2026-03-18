@@ -13,6 +13,7 @@ GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_5D = 100000 
 PRICE_MIN = 500 
+VOLATILITY_THRESHOLD = 0.03  # 直近5日の振幅が3%以上の銘柄を優先
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
@@ -30,7 +31,7 @@ def get_target_tickers():
         target_df = df[df['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]
         return {str(row['コード']) + ".T": f"{row['銘柄名']}({row['市場・商品区分'][:1]})" for _, row in target_df.iterrows()}
     except:
-        return {"8035.T": "東エレク(プ)", "9984.T": "SBG(プ)", "7203.T": "トヨタ(プ)", "8306.T": "三菱UFJ(プ)"}
+        return {"8035.T": "東エレク(プ)", "9984.T": "SBG(プ)", "7203.T": "トヨタ(プ)"}
 
 def get_rsi_vectorized(df, period):
     delta = df.diff()
@@ -48,179 +49,111 @@ def get_rci_vectorized(df, period):
 def send_discord(text):
     if not text.strip(): return
     try:
+        # Discordの文字数制限2000文字対策
         for i in range(0, len(text), 1900):
             requests.post(DISCORD_URL, json={"content": text[i:i+1900]}, timeout=10)
             time.sleep(1)
     except Exception as e:
-        print(f"Discord送信エラー: {e}", flush=True)
+        print(f"Discordエラー: {e}")
 
 def get_ai_insight(msg_text):
-    prompt = f"""あなたは日本株のプロトレーダーです。以下の厳選された銘柄群を分析してください。
-    
-    【重要：分析の評価基準】
-    - VWAP乖離率：25日VWAPから下に大きくマイナス乖離しているほど「反発（リバウンド）のエネルギーが強い」と評価し、プラスに乖離している銘柄（急落警戒カテゴリ）は「下落の危険が高い」と評価してください。
-    - トレンド(MA25,60,200)：[🚀完全上昇(PO)]の中での買いシグナルは本物、[📉完全下降(PO)]の中での買いシグナルは「だましの可能性あり」として厳しく判定してください。
-
-    【必須項目】
-    1. 各銘柄のVWAP乖離とトレンドを踏まえた「だまし回避」の具体的な解説。
-    2. デイトレ・スイングでの買い時/売り時のタイミング、反発・急落の予想日、目標価格。
-    
-    【対象データ】
-    {msg_text}
-    """
+    # プロンプトを極限まで短縮し、エラーを回避
+    prompt = f"日本株プロとして以下を300字以内で短評せよ。1.本命1銘柄 2.だまし回避の注意点 3.目標株価。データ：\n{msg_text}"
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-    headers = {'Content-Type': 'application/json'}
     try:
-        res = requests.post(url, headers=headers, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7}
+        }
+        res = requests.post(url, json=payload, timeout=30)
         data = res.json()
-        if res.status_code == 200 and "candidates" in data:
-            return data['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"AIエラー: {res.status_code}"
-    except Exception as e: 
-        return f"AI通信タイムアウト: {e}"
+        return data['candidates'][0]['content']['parts'][0]['text']
+    except:
+        return "AI分析：現在データが混み合っています。各指標を確認してください。"
 
 def main():
     if is_market_holiday():
-        print("☕ 本日は休場です。", flush=True)
+        print("☕ 本日は休場です。")
         return
 
-    print("🚀 VWAP乖離＆トレンド搭載・完全仕分けスキャン開始...", flush=True)
+    print("🚀 スキャン開始（ボラティリティ重視モード）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
-    # カテゴリごとに (乖離率, テキスト) のタプルで保存（後でソートして絞り込むため）
     categories = {
-        "🔴【空売り推奨】(RSI90以上 ＆ RCI95以上)": [],
-        "🟢【買い推奨】(RSI20以下 ＆ RCI-70以下)": [],
-        "✨【同時GC】(RSI50以下/RCI-50以下)": [],
-        "🦴【片方GC】(翌日買い時)": [],
-        "🚀【RSI10以下】(翌日急騰期待)": []
+        "🔴【空売り候補】": [], "🟢【反発狙い】": [], 
+        "✨【同時GC】": [], "🚀【急騰期待】": []
     }
     
-    chunk_size = 200 
+    chunk_size = 100 # サイトに蹴られない適正サイズ
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
-        print(f"⏳ 分析中... {i} ～ {min(i+chunk_size, len(tickers))} 銘柄目", flush=True)
         try:
-            # 💡 MA200を計算するため、1年分のデータを取得
-            data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=False)
-            close_df = data['Close'] if 'Close' in data else data
-            vol_df = data['Volume'] if 'Volume' in data else None
+            # threads=Trueで高速化
+            data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=True)
+            close_df = data['Close']
+            vol_df = data['Volume']
+            high_df = data['High']
+            low_df = data['Low']
             
             rsi_s = get_rsi_vectorized(close_df, 9)
             rsi_l = get_rsi_vectorized(close_df, 14)
             rci_s = get_rci_vectorized(close_df, 9)
             rci_l = get_rci_vectorized(close_df, 26)
             
-            if vol_df is not None:
-                cv_df = close_df * vol_df
-            
             for s in chunk:
                 try:
                     c = close_df[s].dropna()
-                    # 200日線を出したいので最低200日のデータが必要
                     if len(c) < 200 or c.iloc[-1] < PRICE_MIN: continue
                     
-                    if vol_df is not None:
-                        v = vol_df[s].dropna()
-                        if len(v) < 25 or v.tail(5).mean() < MIN_VOLUME_5D: continue
-                    
-                    p = c.iloc[-1]
-                    
-                    # MA計算
-                    ma25 = c.rolling(25).mean().iloc[-1]
-                    ma60 = c.rolling(60).mean().iloc[-1]
-                    ma200 = c.rolling(200).mean().iloc[-1]
-                    
-                    # 💡 トレンド判定 (パーフェクトオーダー)
-                    trend_mark = "〰️混迷"
-                    if p > ma25 and ma25 > ma60 and ma60 > ma200:
-                        trend_mark = "🚀完全上昇(PO)"
-                    elif p < ma25 and ma25 < ma60 and ma60 < ma200:
-                        trend_mark = "📉完全下降(PO)"
-                    elif ma25 > ma60:
-                        trend_mark = "↗️短期上昇"
-                    elif ma25 < ma60:
-                        trend_mark = "↘️短期下降"
+                    v = vol_df[s].dropna()
+                    if v.tail(5).mean() < MIN_VOLUME_5D: continue
 
-                    c_rs, c_rl = rsi_s[s].iloc[-1], rsi_l[s].iloc[-1]
-                    p_rs, p_rl = rsi_s[s].iloc[-2], rsi_l[s].iloc[-2]
+                    # --- 値動き（ボラティリティ）判定 ---
+                    # 直近5日の(高値-安値)/株価 で振幅を計算
+                    recent_volatility = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
+                    if recent_volatility < VOLATILITY_THRESHOLD: continue
+
+                    p = c.iloc[-1]
+                    ma25 = c.rolling(25).mean().iloc[-1]
+                    vwap_25d = (close_df[s].tail(25) * vol_df[s].tail(25)).sum() / vol_df[s].tail(25).sum()
+                    kairi = ((p - vwap_25d) / vwap_25d) * 100
+
+                    c_rs, p_rs = rsi_s[s].iloc[-1], rsi_s[s].iloc[-2]
+                    c_rl, p_rl = rsi_l[s].iloc[-1], rsi_l[s].iloc[-2]
+                    c_rcs, p_rcs = rci_s[s].iloc[-1], rci_s[s].iloc[-2]
+                    c_rcl = rci_l[s].iloc[-1]
                     
-                    c_rcs, c_rcl = rci_s[s].iloc[-1], rci_l[s].iloc[-1]
-                    p_rcs, p_rcl = rci_s[s].iloc[-2], rci_l[s].iloc[-2]
-                    
-                    # クロス判定 (GC)
                     rsi_gc = (p_rs <= p_rl and c_rs > c_rl)
-                    rci_gc = (p_rcs <= p_rcl and c_rcs > c_rcl)
+                    rci_gc = (p_rcs <= rci_l[s].iloc[-2] and c_rcs > c_rcl)
                     
-                    sim_gc = rsi_gc and rci_gc
-                    single_gc = (rsi_gc or rci_gc) and not sim_gc
-                    
-                    # 条件
-                    cond_sell = (c_rs >= 90 and c_rcs >= 95)
-                    cond_buy = (c_rs <= 20 and c_rcs <= -70)
-                    cond_sim_gc = (sim_gc and c_rs <= 50 and c_rcs <= -50)
-                    cond_single_gc = (single_gc and c_rs <= 50 and c_rcs <= -50)
-                    cond_rsi10 = (c_rs <= 10)
-                    
-                    if any([cond_sell, cond_buy, cond_sim_gc, cond_single_gc, cond_rsi10]):
-                        # 💡 25日VWAPと乖離率の計算
-                        cv_25d_sum = cv_df[s].tail(25).sum()
-                        v_25d_sum = vol_df[s].tail(25).sum()
-                        vwap_25d = cv_25d_sum / v_25d_sum if v_25d_sum > 0 else p
-                        
-                        # 乖離率(%)
-                        kairi = ((p - vwap_25d) / vwap_25d) * 100
-                        kairi_str = f"{kairi:+.1f}%"
-                        
-                        info = f"・{name_map[s]} ({s}) {p:,.0f}円\n   ⇒ VWAP乖離: [{kairi_str}] | RSI:{c_rs:.0f}/RCI:{c_rcs:.0f} | 状態: {trend_mark}"
-                        
-                        # 乖離率と一緒に保存
-                        if cond_sell: categories["🔴【空売り推奨】(RSI90以上 ＆ RCI95以上)"].append((kairi, info))
-                        if cond_buy: categories["🟢【買い推奨】(RSI20以下 ＆ RCI-70以下)"].append((kairi, info))
-                        if cond_sim_gc: categories["✨【同時GC】(RSI50以下/RCI-50以下)"].append((kairi, info))
-                        if cond_single_gc: categories["🦴【片方GC】(翌日買い時)"].append((kairi, info))
-                        if cond_rsi10: categories["🚀【RSI10以下】(翌日急騰期待)"].append((kairi, info))
+                    info = f"・{name_map[s]} ({s})\n   価:{p:,.0f} 乖離:{kairi:+.1f}% RSI:{c_rs:.0f}"
+
+                    if c_rs >= 85 and c_rcs >= 90: categories["🔴【空売り候補】"].append((kairi, info))
+                    elif c_rs <= 20 and c_rcs <= -75: categories["🟢【反発狙い】"].append((kairi, info))
+                    elif rsi_gc and rci_gc and c_rs < 50: categories["✨【同時GC】"].append((kairi, info))
+                    elif c_rs <= 12: categories["🚀【急騰期待】"].append((kairi, info))
                         
                 except: continue
         except: continue
-        time.sleep(1)
+        time.sleep(1.5) # 負荷軽減のウェイト
 
-    print("✨ スキャン完了！", flush=True)
-
-    has_hits = False
-    ai_target_text = ""
-    
-    for cat_name, items in categories.items():
+    ai_text = ""
+    for cat, items in categories.items():
         if items:
-            has_hits = True
-            
-            # 💡 絞り込みロジック：乖離率でソートして上位5件を厳選
-            if "空売り" in cat_name:
-                # 空売りは「上に乖離している（プラスが大きい）」ものを優先
-                sorted_items = sorted(items, key=lambda x: x[0], reverse=True)[:5]
-            else:
-                # 買いは「下に乖離している（マイナスが大きい）」ものを優先（売られすぎ反発狙い）
-                sorted_items = sorted(items, key=lambda x: x[0])[:5]
-                
-            # テキストだけを取り出す
-            text_list = [item[1] for item in sorted_items]
-            
-            msg = f"**{cat_name}**\n" + "\n".join(text_list)
+            # 乖離率でソートして上位3件を表示
+            top_items = sorted(items, key=lambda x: abs(x[0]), reverse=True)[:3]
+            msg = f"**{cat}**\n" + "\n".join([x[1] for x in top_items])
             send_discord(msg)
-            
-            # AIには各カテゴリ上位2件だけ渡してパンクを防ぐ
-            ai_target_text += f"{cat_name}\n" + "\n".join(text_list[:2]) + "\n\n"
+            # AIには各カテゴリのトップ1件だけを渡して短縮
+            ai_text += f"{cat}:{top_items[0][1]}\n"
 
-    if has_hits:
-        print("🤖 AIへ分析を依頼中...", flush=True)
-        ai_msg = get_ai_insight(ai_target_text)
-        send_discord(f"🤖 **【AI 反発予想 ＆ だまし回避】**\n\n{ai_msg}")
-        print("✅ 全ての処理が完了しました。", flush=True)
-    else:
-        print("🔍 該当銘柄なし", flush=True)
-        send_discord("🔍 **【Jack株AI】**\n本日はメモの条件に合致する銘柄はありませんでした。")
+    if ai_text:
+        print("🤖 AI分析中...")
+        insight = get_ai_insight(ai_text)
+        send_discord(f"🤖 **【AI厳選・短評】**\n{insight}")
+
+    print("✅ 完了")
 
 if __name__ == "__main__":
     main()
