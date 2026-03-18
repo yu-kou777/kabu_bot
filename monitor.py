@@ -9,7 +9,7 @@ import pytz
 import jpholiday
 
 # --- 設定 ---
-# 【重要】もう一つのAPIキーをここに入れて試してください
+# 【重要】もし404が続くなら、AI Studioで「New API Key in new project」を選んで発行し直したキーをここに入れてください
 GEMINI_KEY = "AIzaSyD0AyTtuRvEwv36ZtleptL6wbtolUMuIkk"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_5D = 100000 
@@ -52,19 +52,22 @@ def send_discord(text, title=None):
     content = f"**【{title}】**\n{text}" if title else text
     try:
         requests.post(DISCORD_URL, json={"content": content}, timeout=10)
-        time.sleep(1.2)
+        time.sleep(1.5)
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 404対策：v1betaエンドポイントを使い、モデル名を正確に指定
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # 404回避：モデル名を「gemini-1.5-flash-latest」に変更し、より広範なパスを試行
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
     
-    prompt = f"株プロとして以下から本命1銘柄を厳選、理由と目標値を100字以内で。:\n{msg_text}"
+    prompt = f"日本株プロとして以下から本命1銘柄を厳選、理由と目標値を100字以内で述べよ。:\n{msg_text}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.4}
+        "generationConfig": {
+            "maxOutputTokens": 200,
+            "temperature": 0.4
+        }
     }
 
     try:
@@ -73,7 +76,14 @@ def get_ai_insight(msg_text):
             data = res.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
         else:
-            return f"AI分析停止 (Status: {res.status_code})\n詳細: {res.text[:50]}"
+            # 404が続く場合、モデル名を「gemini-pro」にフォールバックして再試行
+            alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_KEY}"
+            res_alt = requests.post(alt_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=15)
+            if res_alt.status_code == 200:
+                data = res_alt.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"] + "\n(※gemini-proで回答)"
+            
+            return f"AI分析停止 (Status: {res.status_code})\n詳細: {res.text[:40]}"
     except:
         return "AI分析スキップ (通信エラー)"
 
@@ -82,7 +92,7 @@ def main():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 スキャン開始（新APIキー適用版）...")
+    print("🚀 スキャン開始（AIエラー自動回避ロジック搭載版）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -109,7 +119,7 @@ def main():
                     if len(c) < 200 or c.iloc[-1] < PRICE_MIN: continue
                     if vol_df[s].tail(5).mean() < MIN_VOLUME_5D: continue
 
-                    # 値動き（ボラティリティ）で厳選
+                    # ボラティリティ（値動きの激しさ）を重視
                     vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
                     if vol < VOLATILITY_THRESHOLD: continue
 
@@ -133,7 +143,7 @@ def main():
     ai_input_data = ""
     hit_flag = False
     
-    # 銘柄リストを送信（AIの前に実行）
+    # 1. 銘柄リストを送信（AIの前に実行。これは絶対に届く）
     for cat_name, items in categories.items():
         if items:
             hit_flag = True
@@ -142,15 +152,15 @@ def main():
             send_discord(display_text, title=f"📊 {cat_name} スキャン結果")
             ai_input_data += f"{cat_name}: {sorted_items[0][1]}\n"
 
-    # AI短評を送信
+    # 2. AI短評を送信
     if hit_flag:
         print("🤖 AI分析中...")
         ai_comment = get_ai_insight(ai_input_data)
         send_discord(ai_comment, title="🤖 AIプロの厳選短評")
     else:
-        send_discord("該当なし", title="🔍 スキャン完了")
+        send_discord("本日はボラティリティ条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
 
-    print("✅ 完了")
+    print("✅ 全工程完了")
 
 if __name__ == "__main__":
     main()
