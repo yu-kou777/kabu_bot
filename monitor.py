@@ -9,18 +9,16 @@ import pytz
 import jpholiday
 
 # --- 設定 ---
-# 【重要】新しいキーをセットしました。これをGitHub等に公開しないでください。
 GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-VOLATILITY_THRESHOLD = 0.035 # 5日間で3.5%以上の値動きがある銘柄を抽出
+VOLATILITY_THRESHOLD = 0.035 
 PRICE_MIN = 500
 MIN_VOLUME_5D = 100000
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
     now = datetime.now(tz)
-    # 土日または祝日判定
     return now.weekday() >= 5 or jpholiday.is_holiday(now.date())
 
 def get_target_tickers():
@@ -32,8 +30,7 @@ def get_target_tickers():
         target_df = df[df['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]
         return {str(row['コード']) + ".T": f"{row['銘柄名']}({row['市場・商品区分'][:1]})" for _, row in target_df.iterrows()}
     except:
-        # 通信エラー時のバックアップ
-        return {"7203.T": "トヨタ(プ)", "8306.T": "三菱UFJ(プ)", "9984.T": "SBG(プ)"}
+        return {"7203.T": "トヨタ", "8306.T": "三菱UFJ", "9984.T": "SBG"}
 
 def get_rsi_vectorized(df, period):
     delta = df.diff()
@@ -45,42 +42,34 @@ def send_discord(text, title=None):
     if not text.strip(): return
     content = f"**【{title}】**\n{text}" if title else text
     try:
-        # Discordへ送信
         requests.post(DISCORD_URL, json={"content": content}, timeout=10)
-        time.sleep(1.2) # 連投制限対策
+        time.sleep(1.2)
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 【404対策】最新の安定版エンドポイントを直接叩く
+    # エンドポイント
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-    prompt = f"日本株プロとして以下の銘柄群から本命1つを厳選し、理由と目標値を100字以内で述べよ。:\n{msg_text}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.4}
-    }
+    payload = {"contents": [{"parts": [{"text": f"株プロとして1銘柄厳選し短評せよ:\n{msg_text}"}]}]}
     try:
-        res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
+        res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
         if res.status_code == 200:
-            data = res.json()
-            if "candidates" in data and data["candidates"]:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-        return f"AI分析スキップ (Status: {res.status_code})\n※銘柄リストを参考にしてください。"
+            return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return None # 404等の場合はNoneを返してシステム選定に切り替える
     except:
-        return "AI通信エラー：銘柄リストのテクニカル指標を優先してください。"
+        return None
 
 def main():
     if is_market_holiday():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 高速スキャン開始（新キー・銘柄優先送信モード）...")
+    print("🚀 スキャン開始（AIバックアップ・システム選定搭載）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
     selected_list = []
     
-    # チャンク分けしてデータ取得
     chunk_size = 120
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
@@ -92,42 +81,45 @@ def main():
             for s in chunk:
                 try:
                     c = close_df[s].dropna()
-                    # 最低限のデータ量と株価のフィルタ
                     if len(c) < 50 or c.iloc[-1] < PRICE_MIN: continue
                     
-                    # ボラティリティ判定（直近5日の高値と安値の幅）
-                    high_5d = high_df[s].tail(5).max()
-                    low_5d = low_df[s].tail(5).min()
-                    vol = (high_5d - low_5d) / c.iloc[-1]
-                    
+                    vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
                     cur_rsi = rsi_df[s].iloc[-1]
 
-                    # 値動きが激しい銘柄をピックアップ
                     if vol >= VOLATILITY_THRESHOLD:
-                        status = "🔥急騰" if cur_rsi > 70 else "❄️反発期待" if cur_rsi < 30 else "⚡活況"
-                        info = f"・{name_map[s]} ({s}) 価:{c.iloc[-1]:,.0f} RSI:{cur_rsi:.0f} [{status}]"
-                        selected_list.append((vol, info))
+                        info = f"・{name_map[s]} ({s}) 価:{c.iloc[-1]:,.0f} RSI:{cur_rsi:.0f}"
+                        # 乖離率やRSI、ボラティリティをスコア化して保存
+                        score = vol * (1 + abs(50 - cur_rsi) / 100) 
+                        selected_list.append({"info": info, "score": score, "rsi": cur_rsi})
                 except: continue
         except: continue
         time.sleep(1)
 
     if selected_list:
-        # ボラティリティが高い順にソートして上位15件
-        sorted_list = sorted(selected_list, key=lambda x: x[0], reverse=True)[:15]
-        display_text = "\n".join([x[1] for x in sorted_list])
+        # スコア順にソート
+        sorted_list = sorted(selected_list, key=lambda x: x['score'], reverse=True)
+        display_text = "\n".join([x['info'] for x in sorted_list[:15]])
         
-        # 💡【重要】まず銘柄リストを送信（AIの成否に関わらず必ず届く）
+        # 1. 銘柄リストを送信
         send_discord(display_text, title="📊 本日の高ボラティリティ銘柄リスト")
         
-        # 💡【次に】AIの短評を送信
-        print("🤖 AI分析リクエスト中...")
-        ai_input = "\n".join([x[1] for x in sorted_list[:5]]) # 上位5件をAIに渡す
-        ai_msg = get_ai_insight(ai_input)
-        send_discord(ai_msg, title="🤖 AIプロの厳選短評")
+        # 2. AI短評の取得（失敗したらシステムによる自動選定を表示）
+        print("🤖 分析を実行中...")
+        ai_msg = get_ai_insight(display_text[:500])
+        
+        if ai_msg:
+            send_discord(ai_msg, title="🤖 AIプロの厳選短評")
+        else:
+            # AIが404で落ちた場合のバックアップロジック
+            best = sorted_list[0]
+            reason = "ボラティリティ最大" if best['rsi'] > 30 else "売られすぎからのリバウンド狙い"
+            backup_msg = f"【システム選定本命】\n{best['info']}\n理由：スコア最高値。{reason}。AI通信エラーのためシステムが自動選定しました。"
+            send_discord(backup_msg, title="⚙️ システムによる自動厳選")
     else:
-        send_discord("条件に合致する銘柄は見つかりませんでした。", title="🔍 スキャン完了")
+        send_discord("条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
 
-    print("✅ 全ての工程が完了しました。")
+    print("✅ 全工程完了")
 
 if __name__ == "__main__":
     main()
+
