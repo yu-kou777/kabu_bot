@@ -32,11 +32,13 @@ def get_target_tickers():
     except:
         return {"7203.T": "トヨタ", "8306.T": "三菱UFJ", "9984.T": "SBG"}
 
-def get_rsi_vectorized(df, period):
-    delta = df.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    return 100 - (100 / (1 + (gain / loss + 1e-9)))
+def get_rci_vectorized(df, period):
+    """RCI(順位相関係数)のベクトル計算"""
+    def _rci(x):
+        n = len(x)
+        d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
+        return (1 - (6 * d) / (n * (n**2 - 1))) * 100
+    return df.rolling(window=period).apply(_rci)
 
 def send_discord(text, title=None):
     if not text.strip(): return
@@ -48,14 +50,14 @@ def send_discord(text, title=None):
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # エンドポイント
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-    payload = {"contents": [{"parts": [{"text": f"株プロとして1銘柄厳選し短評せよ:\n{msg_text}"}]}]}
+    prompt = f"日本株プロとしてRCIとVWAPから厳選1銘柄の買い時/売り時を100字以内で述べよ:\n{msg_text}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
         if res.status_code == 200:
             return res.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return None # 404等の場合はNoneを返してシステム選定に切り替える
+        return None
     except:
         return None
 
@@ -64,62 +66,81 @@ def main():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 スキャン開始（AIバックアップ・システム選定搭載）...")
+    print("🚀 スキャン開始（RCI・VWAP判定モード）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
     selected_list = []
     
-    chunk_size = 120
+    chunk_size = 100
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
             data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=True)
-            close_df, high_df, low_df = data['Close'], data['High'], data['Low']
-            rsi_df = get_rsi_vectorized(close_df, 9)
+            close_df = data['Close']
+            vol_df = data['Volume']
+            high_df = data['High']
+            low_df = data['Low']
+            
+            # 指標計算
+            rci9_df = get_rci_vectorized(close_df, 9)
+            rci26_df = get_rci_vectorized(close_df, 26)
+            cv_df = close_df * vol_df
 
             for s in chunk:
                 try:
                     c = close_df[s].dropna()
-                    if len(c) < 50 or c.iloc[-1] < PRICE_MIN: continue
+                    if len(c) < 30 or c.iloc[-1] < PRICE_MIN: continue
                     
-                    vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
-                    cur_rsi = rsi_df[s].iloc[-1]
+                    v = vol_df[s].dropna()
+                    if v.tail(5).mean() < MIN_VOLUME_5D: continue
 
+                    p = c.iloc[-1]
+                    # 25日VWAP計算
+                    v_sum = v.tail(25).sum()
+                    vwap25 = cv_df[s].tail(25).sum() / v_sum if v_sum > 0 else p
+                    kairi = ((p - vwap25) / vwap25) * 100
+                    
+                    rci9 = rci9_df[s].iloc[-1]
+                    rci26 = rci26_df[s].iloc[-1]
+                    
+                    # 判定ロジック
+                    judge = "ーー"
+                    if rci9 <= -80 and rci26 <= -50:
+                        judge = "🔵買い時(底圏)"
+                    elif rci9 >= 80 and rci26 >= 50:
+                        judge = "🔴売り時(天圏)"
+                    elif rci9 > rci9_df[s].iloc[-2] and rci9_df[s].iloc[-2] < -80:
+                        judge = "✨反転(買い)"
+                    
+                    vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / p
+                    
                     if vol >= VOLATILITY_THRESHOLD:
-                        info = f"・{name_map[s]} ({s}) 価:{c.iloc[-1]:,.0f} RSI:{cur_rsi:.0f}"
-                        # 乖離率やRSI、ボラティリティをスコア化して保存
-                        score = vol * (1 + abs(50 - cur_rsi) / 100) 
-                        selected_list.append({"info": info, "score": score, "rsi": cur_rsi})
+                        info = f"・{name_map[s]} ({s})\n   価:{p:,.0f}円 | VWAP乖離:{kairi:+.1f}%\n   RCI9:{rci9:.0f} / RCI26:{rci26:.0f}\n   判定: **{judge}**"
+                        selected_list.append({"info": info, "rci9": rci9, "kairi": kairi})
                 except: continue
         except: continue
         time.sleep(1)
 
     if selected_list:
-        # スコア順にソート
-        sorted_list = sorted(selected_list, key=lambda x: x['score'], reverse=True)
-        display_text = "\n".join([x['info'] for x in sorted_list[:15]])
+        # VWAP乖離がマイナス（売られすぎ）かつRCIが低い順にソート（買いチャンス優先）
+        sorted_list = sorted(selected_list, key=lambda x: x['kairi'])
+        display_text = "\n".join([x['info'] for x in sorted_list[:12]])
         
-        # 1. 銘柄リストを送信
-        send_discord(display_text, title="📊 本日の高ボラティリティ銘柄リスト")
+        send_discord(display_text, title="📊 RCI & VWAP 厳選リスト")
         
-        # 2. AI短評の取得（失敗したらシステムによる自動選定を表示）
-        print("🤖 分析を実行中...")
-        ai_msg = get_ai_insight(display_text[:500])
-        
+        # AI分析（バックアップ付き）
+        print("🤖 分析中...")
+        ai_msg = get_ai_insight(display_text[:600])
         if ai_msg:
-            send_discord(ai_msg, title="🤖 AIプロの厳選短評")
+            send_discord(ai_msg, title="🤖 AIプロの売買助言")
         else:
-            # AIが404で落ちた場合のバックアップロジック
             best = sorted_list[0]
-            reason = "ボラティリティ最大" if best['rsi'] > 30 else "売られすぎからのリバウンド狙い"
-            backup_msg = f"【システム選定本命】\n{best['info']}\n理由：スコア最高値。{reason}。AI通信エラーのためシステムが自動選定しました。"
-            send_discord(backup_msg, title="⚙️ システムによる自動厳選")
+            send_discord(f"【本日の本命】\n{best['info']}\n理由: VWAP乖離が最も大きく、RCIも底圏。反発期待値が高い。", title="⚙️ システム自動選定")
     else:
-        send_discord("条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
+        send_discord("該当なし", title="🔍 スキャン完了")
 
-    print("✅ 全工程完了")
+    print("✅ 完了")
 
 if __name__ == "__main__":
     main()
-
