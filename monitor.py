@@ -56,7 +56,7 @@ def send_discord(text, title=None):
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 【404解決の決定打】URLをv1betaに変更し、モデルパスを明示
+    # 【404対策】URLをv1betaに変更し、モデルの指定を最も汎用的な形式に固定
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"日本株プロとして以下から最も有望な1銘柄を厳選、理由と目標値を100字以内で述べよ。:\n{msg_text}"
@@ -77,8 +77,8 @@ def get_ai_insight(msg_text):
                 return data["candidates"][0]["content"]["parts"][0]["text"]
             return "AI分析：適切な応答が得られませんでした。"
         else:
-            # エラーの詳細（原因）を分かりやすく返す
-            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:60]}"
+            # エラーの詳細をDiscordに出して原因を特定
+            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:50]}"
     except Exception as e:
         return f"AI通信エラー: {str(e)[:30]}"
 
@@ -87,7 +87,7 @@ def main():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 高速スキャン＆API URL最終修正版 開始...")
+    print("🚀 スキャン開始（URL構造・送信順序 最終修正版）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -96,7 +96,7 @@ def main():
         "✨【同時GC】": [], "🚀【急騰期待】": []
     }
     
-    chunk_size = 100
+    chunk_size = 120
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
@@ -133,21 +133,23 @@ def main():
                     elif cur_rsi <= 10: categories["🚀【急騰期待】"].append((kairi, info))
                 except: continue
         except: continue
-        time.sleep(1)
+        time.sleep(1.2)
 
     ai_input_data = ""
     hit_flag = False
     
-    # 1. 銘柄リストを先に送信（これは確実に届く）
+    # --- 1. 銘柄リストを先に送信（これは確実に届く） ---
     for cat_name, items in categories.items():
         if items:
             hit_flag = True
+            # 各カテゴリ上位5件
             sorted_items = sorted(items, key=lambda x: abs(x[0]), reverse=True)[:5]
             display_text = "\n".join([x[1] for x in sorted_items])
             send_discord(display_text, title=f"📊 {cat_name} スキャン結果")
+            # AIには一番強い1銘柄だけ渡す
             ai_input_data += f"{cat_name}: {sorted_items[0][1]}\n"
 
-    # 2. AI短評を最後に送信
+    # --- 2. AI短評を最後に送信 ---
     if hit_flag:
         print("🤖 AI分析中...")
         ai_comment = get_ai_insight(ai_input_data)
@@ -155,8 +157,7 @@ def main():
     else:
         send_discord("本日はボラティリティ条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
 
-    print("✅ 全工程が完了しました。")
+    print("✅ 全処理完了")
 
 if __name__ == "__main__":
     main()
-
