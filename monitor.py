@@ -9,11 +9,12 @@ import pytz
 import jpholiday
 
 # --- 設定 ---
+# ※エラーが出る場合は Google AI Studio で新しいキーを発行してください
 GEMINI_KEY = "AIzaSyCCnORqVcj51CzjvIX8-x2936m8iCbgQgA"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 MIN_VOLUME_5D = 100000 
 PRICE_MIN = 500 
-VOLATILITY_THRESHOLD = 0.03  # 直近5日の振幅が3%以上の銘柄を優先
+VOLATILITY_THRESHOLD = 0.04  # 直近5日の振幅が4%以上の「暴れ馬」を優先
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
@@ -31,7 +32,7 @@ def get_target_tickers():
         target_df = df[df['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]
         return {str(row['コード']) + ".T": f"{row['銘柄名']}({row['市場・商品区分'][:1]})" for _, row in target_df.iterrows()}
     except:
-        return {"8035.T": "東エレク(プ)", "9984.T": "SBG(プ)", "7203.T": "トヨタ(プ)"}
+        return {"8035.T": "東エレク(プ)", "9984.T": "SBG(プ)", "7203.T": "トヨタ(プ)", "8306.T": "三菱UFJ(プ)"}
 
 def get_rsi_vectorized(df, period):
     delta = df.diff()
@@ -49,34 +50,47 @@ def get_rci_vectorized(df, period):
 def send_discord(text):
     if not text.strip(): return
     try:
-        # Discordの文字数制限2000文字対策
         for i in range(0, len(text), 1900):
             requests.post(DISCORD_URL, json={"content": text[i:i+1900]}, timeout=10)
             time.sleep(1)
     except Exception as e:
-        print(f"Discordエラー: {e}")
+        print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # プロンプトを極限まで短縮し、エラーを回避
-    prompt = f"日本株プロとして以下を300字以内で短評せよ。1.本命1銘柄 2.だまし回避の注意点 3.目標株価。データ：\n{msg_text}"
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # プロンプトを極限まで圧縮。1銘柄に絞らせることでエラー率を下げる
+    prompt = f"日本株プロとして以下から本命1銘柄を厳選し、注意点と目標値を150字以内で述べよ。データ:\n{msg_text}"
+    
+    # v1beta を使用し、より安定したエンドポイントを叩く
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 300, "temperature": 0.4}
+    }
+
     try:
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7}
-        }
-        res = requests.post(url, json=payload, timeout=30)
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        # 403や429などのステータスコードをチェック
+        if res.status_code != 200:
+            return f"AIエラー: ステータス {res.status_code} (キー制限または設定ミス)"
+            
         data = res.json()
-        return data['candidates'][0]['content']['parts'][0]['text']
-    except:
-        return "AI分析：現在データが混み合っています。各指標を確認してください。"
+        # 応答のパース処理を堅牢化
+        if "candidates" in data and data["candidates"]:
+            candidate = data["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"]:
+                return candidate["content"]["parts"][0]["text"]
+        
+        return "AI分析：適切な回答が得られませんでした。指標を優先してください。"
+    except Exception as e:
+        return f"AI通信エラー: {str(e)[:50]}"
 
 def main():
     if is_market_holiday():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 スキャン開始（ボラティリティ重視モード）...")
+    print("🚀 VWAP乖離＆ボラティリティ・スキャン開始...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -85,11 +99,11 @@ def main():
         "✨【同時GC】": [], "🚀【急騰期待】": []
     }
     
-    chunk_size = 100 # サイトに蹴られない適正サイズ
+    chunk_size = 120 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
-            # threads=Trueで高速化
+            # 高速化のため threads=True
             data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=True)
             close_df = data['Close']
             vol_df = data['Volume']
@@ -101,6 +115,9 @@ def main():
             rci_s = get_rci_vectorized(close_df, 9)
             rci_l = get_rci_vectorized(close_df, 26)
             
+            # VWAP計算用
+            cv_df = close_df * vol_df
+
             for s in chunk:
                 try:
                     c = close_df[s].dropna()
@@ -109,15 +126,17 @@ def main():
                     v = vol_df[s].dropna()
                     if v.tail(5).mean() < MIN_VOLUME_5D: continue
 
-                    # --- 値動き（ボラティリティ）判定 ---
-                    # 直近5日の(高値-安値)/株価 で振幅を計算
-                    recent_volatility = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
-                    if recent_volatility < VOLATILITY_THRESHOLD: continue
+                    # --- 値動き（ボラティリティ）の厳選 ---
+                    # 直近5日の振幅をチェック
+                    recent_vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
+                    if recent_vol < VOLATILITY_THRESHOLD: continue
 
                     p = c.iloc[-1]
-                    ma25 = c.rolling(25).mean().iloc[-1]
-                    vwap_25d = (close_df[s].tail(25) * vol_df[s].tail(25)).sum() / vol_df[s].tail(25).sum()
-                    kairi = ((p - vwap_25d) / vwap_25d) * 100
+                    
+                    # VWAP乖離率
+                    v_sum_25 = vol_df[s].tail(25).sum()
+                    vwap_25 = cv_df[s].tail(25).sum() / v_sum_25 if v_sum_25 > 0 else p
+                    kairi = ((p - vwap_25) / vwap_25) * 100
 
                     c_rs, p_rs = rsi_s[s].iloc[-1], rsi_s[s].iloc[-2]
                     c_rl, p_rl = rsi_l[s].iloc[-1], rsi_l[s].iloc[-2]
@@ -127,33 +146,37 @@ def main():
                     rsi_gc = (p_rs <= p_rl and c_rs > c_rl)
                     rci_gc = (p_rcs <= rci_l[s].iloc[-2] and c_rcs > c_rcl)
                     
-                    info = f"・{name_map[s]} ({s})\n   価:{p:,.0f} 乖離:{kairi:+.1f}% RSI:{c_rs:.0f}"
+                    # 情報を整形
+                    info = f"・{name_map[s]} ({s})\n   価:{p:,.0f} 乖離:{kairi:+.1f}% RSI:{c_rs:.0f}/RCI:{c_rcs:.0f}"
 
+                    # 判定条件
                     if c_rs >= 85 and c_rcs >= 90: categories["🔴【空売り候補】"].append((kairi, info))
-                    elif c_rs <= 20 and c_rcs <= -75: categories["🟢【反発狙い】"].append((kairi, info))
-                    elif rsi_gc and rci_gc and c_rs < 50: categories["✨【同時GC】"].append((kairi, info))
-                    elif c_rs <= 12: categories["🚀【急騰期待】"].append((kairi, info))
+                    elif c_rs <= 18 and c_rcs <= -75: categories["🟢【反発狙い】"].append((kairi, info))
+                    elif rsi_gc and rci_gc and c_rs < 45: categories["✨【同時GC】"].append((kairi, info))
+                    elif c_rs <= 10: categories["🚀【急騰期待】"].append((kairi, info))
                         
                 except: continue
         except: continue
-        time.sleep(1.5) # 負荷軽減のウェイト
+        time.sleep(1.2) # 負荷軽減
 
     ai_text = ""
     for cat, items in categories.items():
         if items:
-            # 乖離率でソートして上位3件を表示
+            # 乖離の絶対値が大きい順（極端な値ほどチャンス）にソート
             top_items = sorted(items, key=lambda x: abs(x[0]), reverse=True)[:3]
             msg = f"**{cat}**\n" + "\n".join([x[1] for x in top_items])
             send_discord(msg)
-            # AIには各カテゴリのトップ1件だけを渡して短縮
+            # AIへの負荷を減らすため、各カテゴリのトップ1件だけをAIに渡す
             ai_text += f"{cat}:{top_items[0][1]}\n"
 
     if ai_text:
         print("🤖 AI分析中...")
         insight = get_ai_insight(ai_text)
         send_discord(f"🤖 **【AI厳選・短評】**\n{insight}")
+    else:
+        send_discord("🔍 条件に合致する高ボラティリティ銘柄はありませんでした。")
 
-    print("✅ 完了")
+    print("✅ 全処理完了")
 
 if __name__ == "__main__":
     main()
