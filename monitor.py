@@ -50,19 +50,16 @@ def send_discord(text, title=None):
     if not text.strip(): return
     content = f"### {title}\n{text}" if title else text
     try:
-        # 1回のリクエストで送る（2000文字以内を前提）
         requests.post(DISCORD_URL, json={"content": content}, timeout=10)
         time.sleep(1)
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 404対策：URL構造を最新の「models/gemini-1.5-flash:generateContent」に完全準拠
-    # キーをクエリパラメータとして確実に渡す
-    base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-    endpoint = f"{base_url}?key={GEMINI_KEY}"
+    # 【修正】APIバージョンを v1 に戻し、モデル名を指定
+    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
-    prompt = f"日本株プロとして以下から最も有望な1銘柄を挙げ、理由と注意点を100字以内で述べよ。:\n{msg_text}"
+    prompt = f"日本株プロとして以下から本命1銘柄を厳選、理由と注意点を100字以内で。:\n{msg_text}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -71,23 +68,21 @@ def get_ai_insight(msg_text):
 
     try:
         res = requests.post(endpoint, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
-        if res.status_code != 200:
-            # エラーの詳細をDiscordに投げて原因を特定する
-            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:100]}"
-        
-        data = res.json()
-        if "candidates" in data and data["candidates"]:
+        if res.status_code == 200:
+            data = res.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        return "AI分析スキップ (応答なし)"
+        else:
+            # エラー時は詳細を表示してデバッグを容易にする
+            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:50]}"
     except Exception as e:
-        return f"AI分析スキップ (通信エラー: {str(e)[:30]})"
+        return f"AI通信エラー: {str(e)[:30]}"
 
 def main():
     if is_market_holiday():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 スキャン開始...")
+    print("🚀 スキャン開始（AIエンドポイント修正済み）...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -96,15 +91,13 @@ def main():
         "✨【同時GC】": [], "🚀【急騰期待】": []
     }
     
-    chunk_size = 100
+    chunk_size = 120
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
             data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=True)
-            close_df = data['Close']
-            vol_df = data['Volume']
-            high_df = data['High']
-            low_df = data['Low']
+            close_df, vol_df = data['Close'], data['Volume']
+            high_df, low_df = data['High'], data['Low']
             
             rsi_s = get_rsi_vectorized(close_df, 9)
             rci_s = get_rci_vectorized(close_df, 9)
@@ -117,7 +110,7 @@ def main():
                     if len(c) < 200 or c.iloc[-1] < PRICE_MIN: continue
                     if vol_df[s].tail(5).mean() < MIN_VOLUME_5D: continue
 
-                    # ボラティリティ判定
+                    # ボラティリティ判定（値動きの激しさ）
                     volatility = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
                     if volatility < VOLATILITY_THRESHOLD: continue
 
@@ -125,9 +118,7 @@ def main():
                     v_sum = vol_df[s].tail(25).sum()
                     vwap = cv_df[s].tail(25).sum() / v_sum if v_sum > 0 else p
                     kairi = ((p - vwap) / vwap) * 100
-
-                    cur_rsi = rsi_s[s].iloc[-1]
-                    cur_rci = rci_s[s].iloc[-1]
+                    cur_rsi, cur_rci = rsi_s[s].iloc[-1], rci_s[s].iloc[-1]
                     
                     info = f"・{name_map[s]} ({s}) 価:{p:,.0f} 乖:{kairi:+.1f}% RSI:{cur_rsi:.0f}"
 
@@ -140,27 +131,27 @@ def main():
         except: continue
         time.sleep(1)
 
-    # --- 銘柄リストを先に送信 ---
     ai_input_data = ""
-    found_any = False
+    any_hits = False
     
+    # 銘柄リストを送信
     for cat_name, items in categories.items():
         if items:
-            found_any = True
+            any_hits = True
             sorted_items = sorted(items, key=lambda x: abs(x[0]), reverse=True)[:5]
             display_text = "\n".join([x[1] for x in sorted_items])
             send_discord(display_text, title=f"📊 {cat_name} スキャン結果")
             ai_input_data += f"{cat_name}: {sorted_items[0][1]}\n"
 
-    # --- AI分析を別枠で送信 ---
-    if found_any:
-        print("🤖 AI分析を実行中...")
+    # AI分析を送信
+    if any_hits:
+        print("🤖 AI分析リクエスト中...")
         ai_comment = get_ai_insight(ai_input_data)
         send_discord(ai_comment, title="🤖 AIプロの厳選短評")
     else:
-        send_discord("本日は条件に合う銘柄は見つかりませんでした。", title="🔍 スキャン完了")
+        send_discord("該当なし", title="🔍 スキャン完了")
 
-    print("✅ 全工程完了")
+    print("✅ 完了")
 
 if __name__ == "__main__":
     main()
