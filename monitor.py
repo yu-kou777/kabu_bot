@@ -48,32 +48,41 @@ def get_rci_vectorized(df, period):
 
 def send_discord(text, title=None):
     if not text.strip(): return
-    content = f"### {title}\n{text}" if title else text
+    # 太字見出しでDiscordで見やすく整形
+    content = f"**【{title}】**\n{text}" if title else text
     try:
         requests.post(DISCORD_URL, json={"content": content}, timeout=10)
-        time.sleep(1.2) # Discordの連投制限回避
+        time.sleep(1.5)
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
 def get_ai_insight(msg_text):
-    # 【404対策の核心】URLから「models/」を省き、モデル名を直接指定する形式を試行
-    # または、最も標準的な v1beta1 エンドポイントを使用
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # 【404対策】URLエンドポイントをGoogle AI Studio推奨の絶対パス形式に完全固定
+    api_version = "v1"
+    model_id = "gemini-1.5-flash"
+    url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_id}:generateContent?key={GEMINI_KEY}"
     
-    prompt = f"日本株プロとして以下から本命1銘柄を厳選、理由と注意点を100字以内で。:\n{msg_text}"
+    prompt = f"日本株プロとして以下から最も有望な1銘柄を厳選、理由と目標値を100字以内で述べよ。:\n{msg_text}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.4}
+        "generationConfig": {
+            "maxOutputTokens": 250,
+            "temperature": 0.4
+        }
     }
 
     try:
         res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
         if res.status_code == 200:
             data = res.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            if "candidates" in data and data["candidates"]:
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            return "AI分析：適切な応答が得られませんでした。"
         else:
-            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {res.text[:40]}"
+            # 万が一の時のためにエラーの詳細を1行で出す
+            err_msg = res.json().get('error', {}).get('message', 'Unknown Error')
+            return f"AI分析スキップ (Status: {res.status_code})\n詳細: {err_msg[:50]}"
     except Exception as e:
         return f"AI通信エラー: {str(e)[:30]}"
 
@@ -82,7 +91,7 @@ def main():
         print("☕ 本日は休場です。")
         return
 
-    print("🚀 高速スキャン開始...")
+    print("🚀 高速スキャン＆AI URL修正版 開始...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -91,13 +100,13 @@ def main():
         "✨【同時GC】": [], "🚀【急騰期待】": []
     }
     
-    chunk_size = 120
+    chunk_size = 100
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
+            # threads=True で並列取得して高速化
             data = yf.download(chunk, period="1y", interval="1d", progress=False, threads=True)
-            close_df, vol_df = data['Close'], data['Volume']
-            high_df, low_df = data['High'], data['Low']
+            close_df, vol_df, high_df, low_df = data['Close'], data['Volume'], data['High'], data['Low']
             
             rsi_s = get_rsi_vectorized(close_df, 9)
             rci_s = get_rci_vectorized(close_df, 9)
@@ -110,9 +119,9 @@ def main():
                     if len(c) < 200 or c.iloc[-1] < PRICE_MIN: continue
                     if vol_df[s].tail(5).mean() < MIN_VOLUME_5D: continue
 
-                    # ボラティリティ判定（値動きの激しさ）
-                    volatility = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
-                    if volatility < VOLATILITY_THRESHOLD: continue
+                    # 値動きの激しさ（ボラティリティ）で厳選
+                    vol = (high_df[s].tail(5).max() - low_df[s].tail(5).min()) / c.iloc[-1]
+                    if vol < VOLATILITY_THRESHOLD: continue
 
                     p = c.iloc[-1]
                     v_sum = vol_df[s].tail(25).sum()
@@ -129,29 +138,31 @@ def main():
                     elif cur_rsi <= 10: categories["🚀【急騰期待】"].append((kairi, info))
                 except: continue
         except: continue
-        time.sleep(1.2)
+        time.sleep(1)
 
     ai_input_data = ""
-    any_hits = False
+    hit_flag = False
     
-    # 1. まず銘柄リストを送信（AIの成否に関わらず必ず届く）
+    # --- 1. 銘柄リストを先に送信（確実に届く） ---
     for cat_name, items in categories.items():
         if items:
-            any_hits = True
+            hit_flag = True
+            # 各カテゴリ上位5件
             sorted_items = sorted(items, key=lambda x: abs(x[0]), reverse=True)[:5]
             display_text = "\n".join([x[1] for x in sorted_items])
             send_discord(display_text, title=f"📊 {cat_name} スキャン結果")
+            # AIには一番強い1銘柄だけ渡して文字数節約
             ai_input_data += f"{cat_name}: {sorted_items[0][1]}\n"
 
-    # 2. 最後にAI分析を送信
-    if any_hits:
-        print("🤖 AI分析中...")
+    # --- 2. AI短評を最後に送信 ---
+    if hit_flag:
+        print("🤖 AI分析リクエスト実行中...")
         ai_comment = get_ai_insight(ai_input_data)
         send_discord(ai_comment, title="🤖 AIプロの厳選短評")
     else:
-        send_discord("本日はボラティリティ条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
+        send_discord("本日は条件に合う銘柄はありませんでした。", title="🔍 スキャン完了")
 
-    print("✅ 全処理完了")
+    print("✅ 全工程が完了しました。")
 
 if __name__ == "__main__":
     main()
