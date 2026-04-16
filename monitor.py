@@ -33,7 +33,6 @@ def get_target_tickers():
     except:
         return {"7203.T": "トヨタ", "8306.T": "三菱UFJ", "9984.T": "SBG", "8035.T": "東エレク"}
 
-# --- インジケーター計算関数 ---
 def get_rsi_vectorized(df, period):
     delta = df.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -46,20 +45,6 @@ def get_rci_vectorized(df, period):
         d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
         return (1 - (6 * d) / (n * (n**2 - 1))) * 100
     return df.rolling(window=period).apply(_rci)
-
-def get_dmi_vectorized(high_df, low_df, close_df, period=14):
-    up_move = high_df.diff()
-    down_move = low_df.diff().abs()
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    tr1 = high_df - low_df
-    tr2 = (high_df - close_df.shift(1)).abs()
-    tr3 = (low_df - close_df.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1) # 本来は銘柄ごとだが簡易化
-    # ※ベクトル化計算のため実際には銘柄ごとにループ処理
-    return plus_dm, minus_dm, tr
 
 def send_discord(text, title=None, is_ai=False):
     if not text.strip(): return
@@ -85,11 +70,12 @@ def main():
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
+    # 🌟 番号のみを保存するためのリストも追加
     categories = {
-        "🔥【DMI: ゴールデンクロス】(上昇確定)": [],
-        "✨【RCI: ゴールデンクロス】(底値反転)": [],
-        "🐣【DMI: 反転開始】(初動・低位並び)": [],
-        "💀【デッドクロス注意】": []
+        "🔥【DMI: GC】(上昇確定)": {"items": [], "codes": []},
+        "✨【RCI: GC】(底値反転)": {"items": [], "codes": []},
+        "🐣【DMI: 反転開始】(初動)": {"items": [], "codes": []},
+        "💀【デッドクロス注意】": {"items": [], "codes": []}
     }
     
     chunk_size = 80
@@ -97,9 +83,7 @@ def main():
         chunk = tickers[i : i + chunk_size]
         try:
             data = yf.download(chunk, period="1y", interval="1d", progress=False)
-            close_df, high_df, low_df, vol_df = data['Close'], data['High'], data['Low'], data['Volume']
-            
-            # 各指標計算
+            close_df, high_df, low_df = data['Close'], data['High'], data['Low']
             rci9_df = get_rci_vectorized(close_df, 9)
             rci26_df = get_rci_vectorized(close_df, 26)
             rsi_df = get_rsi_vectorized(close_df, 14)
@@ -109,49 +93,42 @@ def main():
                     c = close_df[s].dropna()
                     if len(c) < 30 or c.iloc[-1] < PRICE_MIN: continue
                     
-                    # DMI個別計算 (14日)
                     h, l, cl = high_df[s], low_df[s], close_df[s]
                     tr = pd.concat([(h-l), (h-cl.shift(1)).abs(), (l-cl.shift(1)).abs()], axis=1).max(axis=1).rolling(14).sum()
-                    pdm = (np.where((h.diff()>l.diff().abs())&(h.diff()>0), h.diff(), 0))
-                    pdm_s = pd.Series(pdm, index=h.index).rolling(14).sum()
-                    mdm = (np.where((l.diff().abs()>h.diff())&(l.diff()>0), l.diff().abs(), 0))
-                    mdm_s = pd.Series(mdm, index=h.index).rolling(14).sum()
+                    pdm = pd.Series(np.where((h.diff()>l.diff().abs())&(h.diff()>0), h.diff(), 0), index=h.index).rolling(14).sum()
+                    mdm = pd.Series(np.where((l.diff().abs()>h.diff())&(l.diff()>0), l.diff().abs(), 0), index=h.index).rolling(14).sum()
+                    p_di, m_di = (pdm / tr) * 100, (mdm / tr) * 100
+                    adx = ((p_di - m_di).abs() / (p_di + m_di) * 100).rolling(14).mean()
                     
-                    p_di = (pdm_s / tr) * 100
-                    m_di = (mdm_s / tr) * 100
-                    dx = (p_di - m_di).abs() / (p_di + m_di) * 100
-                    adx = dx.rolling(14).mean()
-                    
-                    # 現在値と前日値
                     p_curr, p_prev = p_di.iloc[-1], p_di.iloc[-2]
                     m_curr, m_prev = m_di.iloc[-1], m_di.iloc[-2]
-                    a_curr, a_prev = adx.iloc[-1], adx.iloc[-2]
-                    
+                    a_curr = adx.iloc[-1]
                     r9_curr, r9_prev = rci9_df[s].iloc[-1], rci9_df[s].iloc[-2]
                     r26_curr, r26_prev = rci26_df[s].iloc[-1], rci26_df[s].iloc[-2]
 
-                    # --- 判定ロジック ---
-                    dmi_msg = ""
-                    # 1. DMIゴールデンクロス (+DIが-DIを上抜く)
-                    is_dmi_gc = (p_prev <= m_prev and p_curr > m_curr)
-                    # 2. DMI反転開始 (+DIが上昇 & 低位並び)
-                    is_dmi_reversal = (p_curr > p_prev and p_curr < 20 and a_curr < 25)
-                    # 3. RCIゴールデンクロス
-                    is_rci_gc = (r9_prev <= r26_prev and r9_curr > r26_curr and r9_curr < 0)
-                    # 4. デッドクロス (RCIまたはDMI)
-                    is_dc = (r9_prev >= r26_prev and r9_curr < r26_curr) or (p_prev >= m_prev and p_curr < m_curr)
-
+                    code_num = s.replace('.T','')
                     stock_card = (
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"**{s.replace('.T','')} : {name_map[s]}**\n"
+                        f"**{code_num} : {name_map[s]}**\n"
                         f"┣ 株価: `{cl.iloc[-1]:,.0f}円` | RSI: `{rsi_df[s].iloc[-1]:.0f}`\n"
                         f"┗ RCI9: `{r9_curr:.0f}` | +DI: `{p_curr:.1f}` | ADX: `{a_curr:.1f}`\n"
                     )
 
-                    if is_dmi_gc: categories["🔥【DMI: ゴールデンクロス】(上昇確定)"].append((p_curr, stock_card))
-                    elif is_dmi_reversal: categories["🐣【DMI: 反転開始】(初動・低位並び)"].append((p_curr, stock_card))
-                    if is_rci_gc: categories["✨【RCI: ゴールデンクロス】(底値反転)"].append((r9_curr, stock_card))
-                    if is_dc and r9_curr > 50: categories["💀【デッドクロス注意】"].append((r9_curr, stock_card))
+                    # 判定と保存
+                    if p_prev <= m_prev and p_curr > m_curr:
+                        categories["🔥【DMI: GC】(上昇確定)"]["items"].append(stock_card)
+                        categories["🔥【DMI: GC】(上昇確定)"]["codes"].append(code_num)
+                    elif p_curr > p_prev and p_curr < 20 and a_curr < 25:
+                        categories["🐣【DMI: 反転開始】(初動)"]["items"].append(stock_card)
+                        categories["🐣【DMI: 反転開始】(初動)"]["codes"].append(code_num)
+                    
+                    if r9_prev <= r26_prev and r9_curr > r26_curr and r9_curr < 0:
+                        categories["✨【RCI: GC】(底値反転)"]["items"].append(stock_card)
+                        categories["✨【RCI: GC】(底値反転)"]["codes"].append(code_num)
+                    
+                    if r9_prev >= r26_prev and r9_curr < r26_curr and r9_curr > 50:
+                        categories["💀【デッドクロス注意】"]["items"].append(stock_card)
+                        categories["💀【デッドクロス注意】"]["codes"].append(code_num)
 
                 except: continue
         except: continue
@@ -159,13 +136,15 @@ def main():
 
     ai_input = ""
     hit_any = False
-    for cat_name, items in categories.items():
-        if items:
+    for cat_name, data in categories.items():
+        if data["items"]:
             hit_any = True
-            sorted_items = sorted(items, key=lambda x: x[0], reverse=True)[:5]
-            display_text = "".join([x[1] for x in sorted_items]) + "━━━━━━━━━━━━━━━━━━"
-            send_discord(display_text, title=cat_name)
-            ai_input += f"【{cat_name}】\n" + sorted_items[0][1]
+            # 詳細リスト（5件）
+            body = "".join(data["items"][:5]) + "━━━━━━━━━━━━━━━━━━"
+            # 🌟 コピペ用番号リストを追加
+            footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
+            send_discord(body + footer, title=cat_name)
+            ai_input += f"【{cat_name}】\n" + data["items"][0]
 
     if hit_any:
         ai_msg = get_ai_insight(ai_input)
@@ -175,3 +154,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
