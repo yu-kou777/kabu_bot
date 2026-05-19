@@ -1,37 +1,44 @@
-import streamlit as st
-import pandas as pd
 import yfinance as yf
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import pandas as pd
 import requests
+import time
 import numpy as np
-from io import BytesIO
+import io
 from datetime import datetime
 import pytz
+import jpholiday
 
-# --- 1. アプリ基本設定 ---
-st.set_page_config(layout="wide", page_title="Jack株AI: スイングプレシジョン", page_icon="🏹")
+# --- ⚙️ 設定（テス流・超厳格スイング仕様） ---
+GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
+DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-# --- 2. 銘柄名取得 ---
-@st.cache_data(ttl=86400)
-def get_jpx_names():
+PRICE_MIN = 300  # 低位株カット（必要に応じて調整）
+
+def is_market_holiday():
+    tz = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(tz)
+    return now.weekday() >= 5 or jpholiday.is_holiday(now.date())
+
+def get_target_tickers():
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-        df = pd.read_excel(BytesIO(res.content), engine='xlrd')
-        return dict(zip(df['コード'].astype(str), df['銘柄名']))
-    except: return {}
-jpx_names = get_jpx_names()
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        df = pd.read_excel(io.BytesIO(res.content), engine='xlrd')
+        target_df = df[df['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]
+        return {str(row['コード']) + ".T": f"{row['銘柄名']}" for _, row in target_df.iterrows()}
+    except:
+        return {"8035.T": "東エレク", "9984.T": "SBG", "6834.T": "精工技研"}
 
-# --- 3. 計算ロジック（マスピ2・Discord通知側と完全同期） ---
-def calculate_rci(series, period):
-    def rci_logic(s):
-        n = len(s); tr = list(range(n, 0, -1)); pr = pd.Series(s).rank(ascending=False).tolist()
-        return (1 - (6 * sum((t - p) ** 2 for t, p in zip(tr, pr))) / (n * (n**2 - 1))) * 100
-    return series.rolling(window=period).apply(rci_logic)
+# --- 📊 テクニカル指標計算ユニット（マスピ2完全準拠） ---
+def calculate_rci(df, period):
+    def _rci(x):
+        n = len(x)
+        d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
+        return (1 - (6 * d) / (n * (n**2 - 1))) * 100
+    return df.rolling(window=period).apply(_rci)
 
-def calculate_psychological(series, period=12):
-    return ((series.diff() > 0).astype(int).rolling(window=period).sum() / period) * 100
+def calculate_psychological(df, period=12):
+    return ((df.diff() > 0).astype(int).rolling(window=period).sum() / period) * 100
 
 def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
     """マスピ2設定：DI=14, ADX=9 に準拠したDMI計算"""
@@ -41,6 +48,7 @@ def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
     dm_pos = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     dm_neg = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
+    # トゥルー・レンジ (TR)
     tr1 = high_df - low_df
     tr2 = (high_df - close_df.shift()).abs()
     tr3 = (low_df - close_df.shift()).abs()
@@ -55,124 +63,112 @@ def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
     
     return plus_di, minus_di, adx
 
-# --- 4. 精密診断エンジン ---
-def diagnose_stock(code):
+def send_discord(text, title=None, color=0x2ecc71):
+    if not text.strip(): return
+    payload = {"embeds": [{"title": title, "description": text, "color": color, "timestamp": datetime.now().isoformat()}]}
     try:
-        df = yf.download(f"{code}.T", period="1y", interval="1d", progress=False)
-        if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        df = df.dropna().astype(float)
-        
-        # 指標計算
-        df['RCI9'] = calculate_rci(df['Close'], 9)
-        df['RCI27'] = calculate_rci(df['Close'], 27)
-        df['Psy'] = calculate_psychological(df['Close'], 12)
-        
-        # DMI一括計算用のデータ成形
-        p_di_df, m_di_df, adx_df = calculate_dmi_custom(
-            pd.DataFrame({code: df['High']}), 
-            pd.DataFrame({code: df['Low']}), 
-            pd.DataFrame({code: df['Close']})
-        )
-        df['PlusDI'] = p_di_df[code]
-        df['MinusDI'] = m_di_df[code]
-        df['ADX'] = adx_df[code]
-        
-        cur, pre = df.iloc[-1], df.iloc[-2]
-        p = cur['Close']
-        
-        # ーーー 📊 出来高データ算出 ーーー
-        vol_3m_avg = df['Volume'].iloc[-60:].mean()
-        vol_today = df['Volume'].iloc[-1]
-        vol_ratio = vol_today / vol_3m_avg
-        
-        # ーーー 🎯 条件判定ロジック（Discord通知側と100%同期） ーーー
-        is_rci_turn_up = (pre['RCI9'] <= -85 and cur['RCI9'] > pre['RCI9']) or (pre['RCI9'] <= -50 and cur['RCI9'] >= -50)
-        is_psy_turn_up = (pre['Psy'] <= 25 and cur['Psy'] > pre['Psy']) or (cur['Psy'] >= 30 and pre['Psy'] <= 30)
-        dmi_approaching = (cur['PlusDI'] > pre['PlusDI']) and (cur['MinusDI'] < pre['MinusDI']) and (cur['PlusDI'] < cur['MinusDI'])
-        
-        # 最終ステータス判定
-        if (cur['RCI27'] >= -50) and is_rci_turn_up and is_psy_turn_up:
-            status, color = "🔥 大底反転（即買い）", "red"
-        elif (cur['RCI9'] <= -80) and (25 <= cur['Psy'] <= 35) and dmi_approaching:
-            status, color = "📈 反転予兆（監視強化）", "blue"
-        else:
-            status, color = "☁️ 条件外（静観）", "gray"
-            
-        return {
-            "name": jpx_names.get(code, "銘柄"), 
-            "code": code, 
-            "price": int(p), 
-            "status": status, 
-            "color": color, 
-            "df": df, 
-            "checks": {
-                "ステータス": status,
-                "本日出来高": f"{vol_ratio:.2f} 倍 (3ヶ月平均比)",
-                "RCI短期(9)": f"{cur['RCI9']:.0f} (前日: {pre['RCI9']:.0f})",
-                "RCI長期(27)": f"{cur['RCI27']:.0f}",
-                "サイコロジカル": f"{cur['Psy']:.0f}%",
-                "DMI状況": f"+DI:{cur['PlusDI']:.0f} / -DI:{cur['MinusDI']:.0f} (ADX:{cur['ADX']:.0f})"
-            }
-        }
-    except Exception as e:
-        return None
+        requests.post(DISCORD_URL, json=payload, timeout=10)
+        time.sleep(1)
+    except: pass
 
-# --- 5. UI構築 ---
-st.title("🏹 Jack株AI: Sniper Precision Dashboard")
-st.markdown("Discordから届いた **コピペ用コード (番号のみ)** をそのまま貼り付けて精密分析を行えます。")
+# --- 🚀 巡回メインロジック ---
+def main():
+    if is_market_holiday():
+        print("☕ 休場日です。")
+        return
 
-codes_input = st.text_area("銘柄コードを貼り付け（カンマ「,」や改行区切りに対応）", "6834, 9984", height=100)
-
-if st.button("🩺 精密分析を実行", type="primary"):
-    # スペース、改行、カンマを綺麗にパースしてコードリスト化
-    raw_codes = codes_input.replace('\n', ',').split(',')
-    code_list = [x.strip() for x in raw_codes if x.strip()]
+    # ⏰ 実行時の日本時間を取得して前場・後場のタイトル・出来高条件を自動切替
+    tz = pytz.timezone('Asia/Tokyo')
+    current_hour = datetime.now(tz).hour
     
-    if not code_list:
-        st.warning("銘柄コードを入力してください。")
+    if current_hour < 13:
+        timing_title = "【前場・11:00中間巡回】"
+        vol_today_multiplier = 0.6  # 11:00時点の出来高ペース換算
+    else:
+        timing_title = "【後場・16:00大引確定】"
+        vol_today_multiplier = 2.0  # 16:00時点の完全確定出来高
+
+    print(f"🚀 {timing_title} テス流・厳選スイングパトロール開始...")
+    name_map = get_target_tickers()
+    tickers = list(name_map.keys())
     
-    for c in code_list:
-        res = diagnose_stock(c)
-        if res:
-            st.markdown(f"### {res['name']} ({res['code']}) : {res['price']:,}円 — `{res['status']}`")
-            col_l, col_r = st.columns([1, 2])
+    categories = {
+        f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)": {"items": [], "codes": [], "color": 0xff3366},
+        f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)": {"items": [], "codes": [], "color": 0x3399ff}
+    }
+
+    chunk_size = 100
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i : i + chunk_size]
+        try:
+            # 取引データを一括ダウンロード
+            data = yf.download(chunk, period="1y", interval="1d", progress=False)
+            cl, hi, lo, vo = data['Close'], data['High'], data['Low'], data['Volume']
             
-            with col_l:
-                st.markdown("#### 🔍 主要パラメータ分析")
-                for k, v in res['checks'].items():
-                    st.write(f"**{k}**: {v}")
+            # 指標の一括計算
+            r9_df, r27_df = calculate_rci(cl, 9), calculate_rci(cl, 27)
+            psy_df = calculate_psychological(cl, 12)
+            plus_di_df, minus_di_df, adx_df = calculate_dmi_custom(hi, lo, cl)
             
-            with col_r:
-                d_df = res['df'].tail(40) # 動きが見えやすいよう40日表示に拡張
-                
-                # チャートの構成（4段構成：ローソク足、出来高、RCI、DMI/Psy）
-                fig = make_subplots(
-                    rows=4, cols=1, 
-                    shared_xaxes=True, 
-                    row_heights=[0.4, 0.15, 0.22, 0.23], 
-                    vertical_spacing=0.03
-                )
-                
-                # 1段目：ローソク足
-                fig.add_trace(go.Candlestick(x=d_df.index, open=d_df['Open'], high=d_df['High'], low=d_df['Low'], close=d_df['Close'], name='足'), row=1, col=1)
-                
-                # 2段目：出来高
-                fig.add_trace(go.Bar(x=d_df.index, y=d_df['Volume'], name='出来高', marker_color='gray'), row=2, col=1)
-                
-                # 3段目：RCI（短期=赤、長期=青）
-                fig.add_trace(go.Scatter(x=d_df.index, y=d_df['RCI9'], line=dict(color='#ff3366', width=2), name='RCI9(短期)'), row=3, col=1)
-                fig.add_trace(go.Scatter(x=d_df.index, y=d_df['RCI27'], line=dict(color='#3399ff', width=2), name='RCI27(長期)'), row=3, col=1)
-                fig.add_shape(type="line", x0=d_df.index[0], y0=-80, x1=d_df.index[-1], y1=-80, line=dict(color="gray", dash="dash"), row=3, col=1)
-                fig.add_shape(type="line", x0=d_df.index[0], y0=-50, x1=d_df.index[-1], y1=-50, line=dict(color="lightgray", dash="dot"), row=3, col=1)
-                
-                # 4段目：DMI ＆ サイコロジカル
-                fig.add_trace(go.Scatter(x=d_df.index, y=d_df['PlusDI'], line=dict(color='orange', width=1.5), name='+DI'), row=4, col=1)
-                fig.add_trace(go.Scatter(x=d_df.index, y=d_df['MinusDI'], line=dict(color='purple', width=1.5), name='-DI'), row=4, col=1)
-                fig.add_trace(go.Scatter(x=d_df.index, y=d_df['Psy'], line=dict(color='green', width=2, dash='dot'), name='Psy(サイコロ)'), row=4, col=1)
-                
-                fig.update_layout(height=750, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-            st.divider()
-        else:
-            st.error(f"銘柄コード: {c} のデータ取得または分析に失敗しました。")
+            for s in chunk:
+                try:
+                    c_s = cl[s].dropna()
+                    v_s = vo[s].dropna()
+                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue
+                    
+                    # ーーー 🛠️ 【超厳格】出来高トリプルフィルター ーーー
+                    vol_3m_avg = v_s.iloc[-60:].mean()          # 3ヶ月平均出来高
+                    vol_today = v_s.iloc[-1]                     # 当日（現時点）の出来高
+                    vol_5d_avg = v_s.iloc[-5:].mean()            # 5日移動平均出来高
+                    
+                    if vol_3m_avg < 500000: continue             # 壁①: 3ヶ月平均50万株以上
+                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue   # 壁②: 出来高急増
+                    if vol_5d_avg < (vol_3m_avg * 1.2): continue  # 壁③: 5日平均1.2倍以上
+                    
+                    # ーーー 📊 テクニカル値の抽出 ーーー
+                    p = c_s.iloc[-1]
+                    r9_c, r9_p = r9_df[s].iloc[-1], r9_df[s].iloc[-2]
+                    r27_c = r27_df[s].iloc[-1]
+                    psy_c, psy_p = psy_df[s].iloc[-1], psy_df[s].iloc[-2]
+                    
+                    p_di_c, p_di_p = plus_di_df[s].iloc[-1], plus_di_df[s].iloc[-2]
+                    m_di_c, m_di_p = minus_di_df[s].iloc[-1], minus_di_df[s].iloc[-2]
+                    
+                    # DMIがお互いに向き合っている（接近している）か判定
+                    dmi_approaching = (p_di_c > p_di_p) and (m_di_c < m_di_p) and (p_di_c < m_di_c)
+                    
+                    code_num = s.replace(".T", "")
+                    vol_ratio = vol_today / vol_3m_avg
+                    
+                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円`) 現時点の出来高:{vol_ratio:.2f}倍\n"
+                            f"└ RCI9: `{r9_c:.0f}`(前`{r9_p:.0f}`) | RCI27: `{r27_c:.0f}` | Psy: `{psy_c:.0f}`\n")
+
+                    # ーーー 🎯 条件判定ロジック ーーー
+                    # 1. 【超厳選・大底反転即買いシグナル】
+                    is_rci_turn_up = (r9_p <= -85 and r9_c > r9_p) or (r9_p <= -50 and r9_c >= -50)
+                    is_psy_turn_up = (psy_p <= 25 and psy_c > psy_p) or (psy_c >= 30 and psy_p <= 30)
+                    
+                    if (r27_c >= -50) and is_rci_turn_up and is_psy_turn_up:
+                        categories[f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)"]["items"].append(card)
+                        categories[f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)"]["codes"].append(code_num)
+                    
+                    # 2. 【反転予兆（監視強化）】
+                    elif (r9_c <= -80) and (25 <= psy_c <= 35) and dmi_approaching:
+                        categories[f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)"]["items"].append(card)
+                        categories[f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)"]["codes"].append(code_num)
+
+                except: continue
+        except: continue
+        time.sleep(1)
+
+    # Discord送信
+    for cat, data in categories.items():
+        if data["items"]:
+            body = "\n".join(data["items"][:15])
+            footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
+            send_discord(body + footer, title=cat, color=data["color"])
+
+    print("✅ パトロール完了")
+
+if __name__ == "__main__":
+    main()
