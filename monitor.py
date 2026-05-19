@@ -8,13 +8,11 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 設定（トモユキさんの情報を維持） ---
+# --- ⚙️ 設定（テス流・超厳格スイング仕様） ---
 GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-# フィルター条件
-MIN_VOLUME_5D = 300000  # 出来高の少ない銘柄は「だまし」が多いのでカット
-PRICE_MIN = 300         # 低位株も含める設定
+PRICE_MIN = 300  # 低位株カット（必要に応じて調整）
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
@@ -31,36 +29,39 @@ def get_target_tickers():
     except:
         return {"8035.T": "東エレク", "9984.T": "SBG", "6834.T": "精工技研"}
 
-# --- 📊 指標計算ユニット ---
+# --- 📊 テクニカル指標計算ユニット（マスピ2完全準拠） ---
 def calculate_rci(df, period):
     def _rci(x):
-        n = len(x); d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
+        n = len(x)
+        d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
         return (1 - (6 * d) / (n * (n**2 - 1))) * 100
     return df.rolling(window=period).apply(_rci)
 
 def calculate_psychological(df, period=12):
     return ((df.diff() > 0).astype(int).rolling(window=period).sum() / period) * 100
 
-def calculate_vwap(data, period=25):
-    tp = (data['High'] + data['Low'] + data['Close']) / 3
-    return (tp * data['Volume']).rolling(window=period).sum() / (data['Volume'].rolling(window=period).sum() + 1e-9)
-
-def get_sakata_signal(h, l, o, c):
-    """酒田五法フィルター：ローソク足の形で最終判断"""
-    s = []
-    # 1. 赤三兵（上昇の継続・初動）
-    if (c.iloc[-1] > o.iloc[-1]) and (c.iloc[-2] > o.iloc[-2]) and (c.iloc[-3] > o.iloc[-3]) and (c.iloc[-1] > c.iloc[-2]):
-        s.append("🔆赤三兵")
-    # 2. 陽の包み足（底値からの反転）
-    if (c.iloc[-2] < o.iloc[-2]) and (c.iloc[-1] > o.iloc[-1]) and (c.iloc[-1] >= o.iloc[-2]):
-        s.append("🔥陽の包み足")
-    # 3. 上放れ窓（勢い加速）
-    if l.iloc[-1] > h.iloc[-2]:
-        s.append("✨上放れ窓")
-    # 4. 明けの明星
-    if (c.iloc[-3] < o.iloc[-3]) and (abs(c.iloc[-2] - o.iloc[-2]) < abs(c.iloc[-3] - o.iloc[-3]) * 0.2) and (c.iloc[-1] > o.iloc[-1]):
-        s.append("🌅明けの明星")
-    return " ".join(s)
+def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
+    """マスピ2設定：DI=14, ADX=9 に準拠したDMI計算"""
+    up_move = high_df.diff()
+    down_move = -low_df.diff()
+    
+    dm_pos = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    dm_neg = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # トゥルー・レンジ (TR)
+    tr1 = high_df - low_df
+    tr2 = (high_df - close_df.shift()).abs()
+    tr3 = (low_df - close_df.shift()).abs()
+    tr = pd.DataFrame(np.max([tr1, tr2, tr3], axis=0), index=close_df.index, columns=close_df.columns)
+    
+    atr = tr.rolling(window=di_period).mean()
+    plus_di = (pd.DataFrame(dm_pos, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
+    minus_di = (pd.DataFrame(dm_neg, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
+    
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9) * 100
+    adx = dx.rolling(window=adx_period).mean()
+    
+    return plus_di, minus_di, adx
 
 def send_discord(text, title=None, color=0x2ecc71):
     if not text.strip(): return
@@ -76,55 +77,87 @@ def main():
         print("☕ 休場日です。")
         return
 
-    print("🚀 Sniper Patrol Start...")
-    name_map = get_target_tickers(); tickers = list(name_map.keys())
+    # ⏰ 実行時の日本時間を取得して前場・後場のタイトル・出来高条件を自動切替
+    tz = pytz.timezone('Asia/Tokyo')
+    current_hour = datetime.now(tz).hour
+    
+    if current_hour < 13:
+        timing_title = "【前場・11:00中間巡回】"
+        vol_today_multiplier = 0.6  # 11:00時点の出来高ペース換算（普段の1日分の60%が午前中に集中）
+    else:
+        timing_title = "【後場・16:00大引確定】"
+        vol_today_multiplier = 2.0  # 16:00時点の完全確定出来高（3ヶ月平均の200%以上）
+
+    print(f"🚀 {timing_title} テス流・厳選スイングパトロール開始...")
+    name_map = get_target_tickers()
+    tickers = list(name_map.keys())
     
     categories = {
-        "🎯【テス流・最速狙撃】(RCI GC × 酒田)": {"items": [], "codes": [], "color": 0x00ffff},
-        "🔥【追撃・トレンド加速】(Psy上昇 × VWAP)": {"items": [], "codes": [], "color": 0x00ff00},
-        "🛑【下落警戒・利確】(RCI DC)": {"items": [], "codes": [], "color": 0xff0000}
+        f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)": {"items": [], "codes": [], "color": 0xff3366},
+        f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)": {"items": [], "codes": [], "color": 0x3399ff}
     }
 
     chunk_size = 100
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
+            # 本日の動的な取引データを1d足で一括ダウンロード
             data = yf.download(chunk, period="1y", interval="1d", progress=False)
-            cl, hi, lo, op, vo = data['Close'], data['High'], data['Low'], data['Open'], data['Volume']
+            cl, hi, lo, vo = data['Close'], data['High'], data['Low'], data['Volume']
             
-            # 指標一括計算
+            # 指標の一括計算
             r9_df, r27_df = calculate_rci(cl, 9), calculate_rci(cl, 27)
             psy_df = calculate_psychological(cl, 12)
+            plus_di_df, minus_di_df, adx_df = calculate_dmi_custom(hi, lo, cl)
             
             for s in chunk:
                 try:
-                    c_s = cl[s].dropna(); p = c_s.iloc[-1]
-                    if len(c_s) < 50 or p < PRICE_MIN: continue
-                    if vo[s].tail(5).mean() < MIN_VOLUME_5D: continue
+                    c_s = cl[s].dropna()
+                    v_s = vo[s].dropna()
+                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue
                     
+                    # ーーー 🛠️ 【超厳格】出来高トリプルフィルター ーーー
+                    vol_3m_avg = v_s.iloc[-60:].mean()          # 3ヶ月(60営業日)平均出来高
+                    vol_today = v_s.iloc[-1]                     # 当日（現時点）の出来高
+                    vol_5d_avg = v_s.iloc[-5:].mean()            # 5日移動平均出来高
+                    
+                    if vol_3m_avg < 500000: continue             # 壁①: 3ヶ月平均50万株以上
+                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue   # 壁②: 時間帯に応じた出来高急増
+                    if vol_5d_avg < (vol_3m_avg * 1.2): continue  # 壁③: 5日平均が3ヶ月平均の1.2倍以上
+                    
+                    # ーーー 📊 テクニカル値の抽出 ーーー
+                    p = c_s.iloc[-1]
                     r9_c, r9_p = r9_df[s].iloc[-1], r9_df[s].iloc[-2]
-                    r27_c, r27_p = r27_df[s].iloc[-1], r27_df[s].iloc[-2]
-                    psy_c = psy_df[s].iloc[-1]
-                    vwap_c = calculate_vwap(data.xs(s, level=1, axis=1) if isinstance(data.columns, pd.MultiIndex) else data).iloc[-1]
-                    sakata = get_sakata_signal(hi[s], lo[s], op[s], cl[s])
+                    r27_c = r27_df[s].iloc[-1]
+                    psy_c, psy_p = psy_df[s].iloc[-1], psy_df[s].iloc[-2]
+                    
+                    p_di_c, p_di_p = plus_di_df[s].iloc[-1], plus_di_df[s].iloc[-2]
+                    m_di_c, m_di_p = minus_di_df[s].iloc[-1], minus_di_df[s].iloc[-2]
+                    
+                    # DMIがお互いに向き合っている（接近している）か判定
+                    dmi_approaching = (p_di_c > p_di_p) and (m_di_c < m_di_p) and (p_di_c < m_di_c)
                     
                     code_num = s.replace(".T", "")
-                    card = f"**{code_num} {name_map[s]}** (`{p:,.0f}円`)\n└ {sakata if sakata else '形:静観'} | RCI9:{r9_c:.0f} Psy:{psy_c:.0f}\n"
+                    vol_ratio = vol_today / vol_3m_avg
+                    
+                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円`) 現時点の出来高:{vol_ratio:.2f}倍\n"
+                            f"└ RCI9: `{r9_c:.0f}`(前`{r9_p:.0f}`) | RCI27: `{r27_c:.0f}` | Psy: `{psy_c:.0f}`\n")
 
-                    # 1. 最速狙撃（RCIクロス ＋ 酒田サインあり）
-                    if (r9_p < r27_p and r9_c >= r27_c and r9_c < 0) and sakata:
-                        categories["🎯【テス流・最速狙撃】(RCI GC × 酒田)"]["items"].append(card)
-                        categories["🎯【テス流・最速狙撃】(RCI GC × 酒田)"]["codes"].append(code_num)
+                    # ーーー 🎯 条件判定ロジック ーーー
+                    # 1. 【超厳選・大底反転即買いシグナル】
+                    # 長期RCIが-50以上（大弱気トレンドのダマシ排除）かつ、短期RCIが大底(-90付近)から反転、または-80から-50を上抜く勢い
+                    is_rci_turn_up = (r9_p <= -85 and r9_c > r9_p) or (r9_p <= -50 and r9_c >= -50)
+                    is_psy_turn_up = (psy_p <= 25 and psy_c > psy_p) or (psy_c >= 30 and psy_p <= 30)
                     
-                    # 2. 追撃（VWAP突破 ＋ 強気サイコロ）
-                    elif (p > vwap_c and cl[s].iloc[-2] <= vwap_c) or (psy_c >= 55 and r9_c > r9_p):
-                        categories["🔥【追撃・トレンド加速】(Psy上昇 × VWAP)"]["items"].append(card)
-                        categories["🔥【追撃・トレンド加速】(Psy上昇 × VWAP)"]["codes"].append(code_num)
+                    if (r27_c >= -50) and is_rci_turn_up and is_psy_turn_up:
+                        categories[f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)"]["items"].append(card)
+                        categories[f"🔥{timing_title}・スイング大底反転 (超厳選・即買い)"]["codes"].append(code_num)
                     
-                    # 3. 利確・空売り（RCIデッドクロス ＋ 高値圏）
-                    elif (r9_p > r27_p and r9_c <= r27_c and r9_c > 70):
-                        categories["🛑【利確・空売り】(RCI DC)"]["items"].append(card)
-                        categories["🛑【利確・空売り】(RCI DC)"]["codes"].append(code_num)
+                    # 2. 【反転予兆（監視強化）】
+                    # RCI短期が-80以下、サイコロが30付近で、DMIがお互いに接近し始めている
+                    elif (r9_c <= -80) and (25 <= psy_c <= 35) and dmi_approaching:
+                        categories[f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)"]["items"].append(card)
+                        categories[f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)"]["codes"].append(code_num)
 
                 except: continue
         except: continue
@@ -133,13 +166,11 @@ def main():
     # Discord送信
     for cat, data in categories.items():
         if data["items"]:
-            # 上位15件に絞って送信
             body = "\n".join(data["items"][:15])
-            # 🌟 コピペ用番号リスト
             footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
             send_discord(body + footer, title=cat, color=data["color"])
 
-    print("✅ Patrol Complete")
+    print("✅ パトロール完了")
 
 if __name__ == "__main__":
     main()
