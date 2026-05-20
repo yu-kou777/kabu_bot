@@ -1,9 +1,5 @@
-streamlit
 yfinance
 pandas
-requests
-xlrd>=2.0.1
 numpy
-openpyxl
-jpholiday
-pytz
+google-genai
+requests
