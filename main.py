@@ -1,260 +1,174 @@
-import os
-import sys
-import datetime
-import requests
-import json
-import numpy as np
-import pandas as pd
 import yfinance as yf
-from google import genai
-from google.genai import types
+import pandas as pd
+import requests
+import time
+import numpy as np
+import io
+from datetime import datetime
+import pytz
+import jpholiday
 
-# ==========================================
-# 1. 各種パラメータ設定 (出来高は緩め設定版)
-# ==========================================
-CONFIG = {
-    "PRIME": {
-        "MIN_AVG_VOLUME": 300000,    # 3ヶ月平均30万株以上に緩和
-        "TODAY_VOL_RATIO": 1.5,      # 大引け後(16:00)の必要出来高倍率（1.5倍に緩和）
-    },
-    "STANDARD": {
-        "MIN_AVG_VOLUME": 200000,    # 3ヶ月平均20万株に緩和
-        "TODAY_VOL_RATIO": 1.5,      # 大引け後(16:00)の必要出来高倍率（1.5倍に緩和）
-    },
-    "BREAKOUT_RANGE": 0.05,          # 250日高値から5%以内、または上抜け
-    "RCI_LONG_THRESHOLD": 50,        # テス流: 長期RCIが+50以上のトレンド継続
-    "RSI_OVERHEAT": 85,              # RSIの極端な過熱（ダマシ）を排除する閾値
-    "MIDDAY_VOL_MULTIPLIER": 0.6     # 11:00時点での前場ペース換算の必要出来高倍率
-}
+# --- ⚙️ 設定（テス流・スイング最適化仕様） ---
+GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
+DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-# 自動スクリーニング対象の銘柄プール（末尾に「.T」が必要です）
-SAMPLE_TICKERS = {
-    "5463.T": {"name": "丸一鋼管", "market": "PRIME"},
-    "5702.T": {"name": "大紀アルミ", "market": "PRIME"},
-    "5801.T": {"name": "古河電工", "market": "PRIME"},
-    "7014.T": {"name": "名村造船所", "market": "STANDARD"},
-    "6834.T": {"name": "精工技研", "market": "STANDARD"},
-    "4107.T": {"name": "伊勢化学", "market": "STANDARD"},
-    "6037.T": {"name": "楽待", "market": "PRIME"},
-    "5803.T": {"name": "フジクラ", "market": "PRIME"},
-    "4208.T": {"name": "UBE", "market": "PRIME"},
-    "2695.T": {"name": "くら寿司", "market": "PRIME"}
-}
+PRICE_MIN = 300  # 低位株カット
 
-# ==========================================
-# 2. テクニカル指標の計算ロジック
-# ==========================================
-def calculate_rci(series, period):
-    def _rci_chunk(chunk):
-        n = len(chunk)
-        if n < period:
-            return np.nan
-        time_rank = np.arange(1, n + 1)[::-1]
-        price_rank = pd.Series(chunk).rank(method='min').values
-        d_square = np.sum((time_rank - price_rank) ** 2)
-        return (1 - (6 * d_square) / (n * (n**2 - 1))) * 100
-    return series.rolling(window=period).apply(_rci_chunk, raw=True)
+def is_market_holiday():
+    tz = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(tz)
+    return now.weekday() >= 5 or jpholiday.is_holiday(now.date())
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / (loss + 1e-10)
-    return 100 - (100 / (1 + rs))
+def get_target_tickers():
+    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+    try:
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        df = pd.read_excel(io.BytesIO(res.content), engine='xlrd')
+        target_df = df[df['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]
+        return {str(row['コード']) + ".T": f"{row['銘柄名']}" for _, row in target_df.iterrows()}
+    except:
+        return {"8035.T": "東エレク", "9984.T": "SBG", "6834.T": "精工技研"}
 
-def calculate_dmi_adx(df, period=9):
-    high, low, close = df['High'], df['Low'], df['Close']
-    up_move, down_move = high.diff(), low.diff()
-    p_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    m_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    p_di = (pd.Series(p_dm).rolling(window=period).mean() / (atr + 1e-10)) * 100
-    m_di = (pd.Series(m_dm).rolling(window=period).mean() / (atr + 1e-10)) * 100
-    return p_di.iloc[-1], m_di.iloc[-1]
+# --- 📊 テクニカル指標計算ユニット（マスピ2完全準拠） ---
+def calculate_rci(df, period):
+    def _rci(x):
+        n = len(x)
+        d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
+        return (1 - (6 * d) / (n * (n**2 - 1))) * 100
+    return df.rolling(window=period).apply(_rci)
 
-def calculate_vwap(df):
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-    pv = typical_price * df['Volume']
-    return pv.rolling(window=25).sum() / (df['Volume'].rolling(window=25).sum() + 1e-10)
+def calculate_psychological(df, period=12):
+    return ((df.diff() > 0).astype(int).rolling(window=period).sum() / period) * 100
 
-# ==========================================
-# 3. 銘柄スクリーニング処理 (時間帯判定ロジック付き)
-# ==========================================
-def scan_markets(current_hour):
-    matched_list = []
+def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
+    """マスピ2設定：DI=14, ADX=9 に準拠したDMI計算"""
+    up_move = high_df.diff()
+    down_move = -low_df.diff()
     
-    # 11時か16時かで出来高の必要ハードルを自動調整
-    is_midday = (current_hour == 11)
+    dm_pos = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    dm_neg = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    for ticker, info in SAMPLE_TICKERS.items():
-        market = info["market"]
-        name = info["name"]
-        param = CONFIG[market]
-        
+    tr1 = high_df - low_df
+    tr2 = (high_df - close_df.shift()).abs()
+    tr3 = (low_df - close_df.shift()).abs()
+    tr = pd.DataFrame(np.max([tr1, tr2, tr3], axis=0), index=close_df.index, columns=close_df.columns)
+    
+    atr = tr.rolling(window=di_period).mean()
+    plus_di = (pd.DataFrame(dm_pos, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
+    minus_di = (pd.DataFrame(dm_neg, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
+    
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9) * 100
+    adx = dx.rolling(window=adx_period).mean()
+    
+    return plus_di, minus_di, adx
+
+def send_discord(text, title=None, color=0x2ecc71):
+    payload = {"embeds": [{"title": title, "description": text, "color": color, "timestamp": datetime.now().isoformat()}]}
+    try:
+        requests.post(DISCORD_URL, json=payload, timeout=10)
+        time.sleep(1)
+    except: pass
+
+# --- 🚀 巡回メインロジック ---
+def main():
+    if is_market_holiday():
+        print("☕ 休場日です。")
+        return
+
+    tz = pytz.timezone('Asia/Tokyo')
+    current_hour = datetime.now(tz).hour
+    
+    if current_hour < 13:
+        timing_title = "【前場・11:00中間巡回】"
+        vol_today_multiplier = 0.4  # 取引時間2時間でのペース換算
+    else:
+        timing_title = "【後場・16:00大引確定】"
+        vol_today_multiplier = 1.5  # 大引け時点で1.5倍以上
+
+    print(f"🚀 {timing_title} テス流・スイングパトロール開始(出来高緩和版)...")
+    name_map = get_target_tickers()
+    tickers = list(name_map.keys())
+    
+    categories = {
+        "buy_signal": {
+            "title": f"🔥{timing_title}・スイング大底反転 (即買い候補)",
+            "items": [], "codes": [], "color": 0xff3366
+        },
+        "forecast_signal": {
+            "title": f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)",
+            "items": [], "codes": [], "color": 0x3399ff
+        }
+    }
+
+    chunk_size = 100
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i : i + chunk_size]
         try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="1.5y")
-            if len(df) < 250:
-                continue
-                
-            today_close = df['Close'].iloc[-1]
-            today_volume = df['Volume'].iloc[-1]
-            avg_volume_3m = df['Volume'].iloc[-60:].mean()
+            data = yf.download(chunk, period="1y", interval="1d", progress=False)
+            cl, hi, lo, vo = data['Close'], data['High'], data['Low'], data['Volume']
             
-            # 3ヶ月平均の最低流動性チェック
-            if avg_volume_3m < param["MIN_AVG_VOLUME"]:
-                continue
+            r9_df, r27_df = calculate_rci(cl, 9), calculate_rci(cl, 27)
+            psy_df = calculate_psychological(cl, 12)
+            plus_di_df, minus_di_df, adx_df = calculate_dmi_custom(hi, lo, cl)
             
-            # 出来高倍率の計算と判定（11時なら前場換算0.6倍、16時なら1.5倍）
-            vol_ratio = today_volume / (avg_volume_3m + 1e-10)
-            required_ratio = CONFIG["MIDDAY_VOL_MULTIPLIER"] if is_midday else param["TODAY_VOL_RATIO"]
-            
-            if vol_ratio < required_ratio:
-                continue
-                
-            # 新高値判定
-            high_250d = df['High'].iloc[-251:-1].max()
-            distance_to_high = (today_close - high_250d) / high_250d
-            
-            if distance_to_high < -CONFIG["BREAKOUT_RANGE"]:
-                continue
-                
-            # テクニカル指標計算
-            df['RCI9'] = calculate_rci(df['Close'], 9)
-            df['RCI27'] = calculate_rci(df['Close'], 27)
-            df['RSI14'] = calculate_rsi(df['Close'], 14)
-            df['VWAP25'] = calculate_vwap(df)
-            
-            rci9_today = df['RCI9'].iloc[-1]
-            rci27_today = df['RCI27'].iloc[-1]
-            rsi14_today = df['RSI14'].iloc[-1]
-            vwap_today = df['VWAP25'].iloc[-1]
-            p_di, m_di = calculate_dmi_adx(df, period=9)
-            
-            # テス流トレンド継続確認 & RSI過熱ダマシ排除
-            if rci27_today < CONFIG["RCI_LONG_THRESHOLD"] or rsi14_today > CONFIG["RSI_OVERHEAT"]:
-                continue
-                
-            vwap_gap = ((today_close - vwap_today) / vwap_today) * 100
-            
-            matched_list.append({
-                "ticker": ticker.replace(".T", ""),
-                "name": name,
-                "market": market,
-                "close": round(today_close, 1),
-                "vol_ratio": round(vol_ratio, 2),
-                "distance_high": round(distance_to_high * 100, 1),
-                "rci9": round(rci9_today, 1),
-                "rci27": round(rci27_today, 1),
-                "rsi14": round(rsi14_today, 1),
-                "vwap_gap": round(vwap_gap, 1),
-                "dmi_signal": "買優位(+DI > -DI)" if p_di > m_di else "拮抗"
-            })
-            
-        except Exception as e:
-            print(f"Error scanning {ticker}: {e}")
-            
-    return matched_list
+            for s in chunk:
+                try:
+                    c_s = cl[s].dropna()
+                    v_s = vo[s].dropna()
+                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue
+                    
+                    vol_3m_avg = v_s.iloc[-60:].mean()
+                    vol_today = v_s.iloc[-1]
+                    vol_5d_avg = v_s.iloc[-5:].mean()
+                    
+                    if vol_3m_avg < 300000: continue
+                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue
+                    if vol_5d_avg < (vol_3m_avg * 1.0): continue
+                    
+                    p = c_s.iloc[-1]
+                    r9_c, r9_p = r9_df[s].iloc[-1], r9_df[s].iloc[-2]
+                    r27_c = r27_df[s].iloc[-1]
+                    psy_c, psy_p = psy_df[s].iloc[-1], psy_df[s].iloc[-2]
+                    
+                    p_di_c, p_di_p = plus_di_df[s].iloc[-1], plus_di_df[s].iloc[-2]
+                    m_di_c, m_di_p = minus_di_df[s].iloc[-1], minus_di_df[s].iloc[-2]
+                    
+                    dmi_approaching = (p_di_c > p_di_p) and (m_di_c < m_di_p) and (p_di_c < m_di_c)
+                    
+                    code_num = s.replace(".T", "")
+                    vol_ratio = vol_today / vol_3m_avg
+                    
+                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円`) 出来高:{vol_ratio:.2f}倍\n"
+                            f"└ RCI9: `{r9_c:.0f}`(前`{r9_p:.0f}`) | RCI27: `{r27_c:.0f}` | Psy: `{psy_c:.0f}`\n")
 
-# ==========================================
-# 4. Gemini API による生成AI分析 (時間帯を考慮)
-# ==========================================
-def get_gemini_analysis(matched_stocks, current_hour):
-    try:
-        client = genai.Client()
-    except Exception as e:
-        return f"Gemini初期化エラー: {e}"
+                    is_rci_turn_up = (r9_p <= -85 and r9_c > r9_p) or (r9_p <= -50 and r9_c >= -50)
+                    is_psy_turn_up = (psy_p <= 25 and psy_c > psy_p) or (psy_c >= 30 and psy_p <= 30)
+                    
+                    if (r27_c >= -50) and is_rci_turn_up and is_psy_turn_up:
+                        categories["buy_signal"]["items"].append(card)
+                        categories["buy_signal"]["codes"].append(code_num)
+                    elif (r9_c <= -80) and (25 <= psy_c <= 35) and dmi_approaching:
+                        categories["forecast_signal"]["items"].append(card)
+                        categories["forecast_signal"]["codes"].append(code_num)
 
-    time_context = "【前場引け前(11:00時点)の途中経過判定】" if current_hour == 11 else "【大引け後(16:00時点)の確定判定】"
+                except: continue
+        except: continue
+        time.sleep(1)
 
-    if len(matched_stocks) > 0:
-        prompt = f"""
-        あなたはプロの機関投資家です。{time_context}として、以下の銘柄が「出来高を伴う250日新高値ブレイクの初動」としてスクリーニングされました。
-        
-        【検出銘柄データ】
-        {json.dumps(matched_stocks, ensure_ascii=False, indent=2)}
-        
-        時間帯の性質（11時なら今日これからの追撃可能性、16時なら明日に向けた持ち越し期待）と、テクニカル面（RCI、RSI、VWAP乖離、DMI）の数値を踏まえ、どのような投資家心理で買われているのかを1銘柄につき3行程度で鋭く論評・解説してください。
-        """
+    total_found = len(categories["buy_signal"]["items"]) + len(categories["forecast_signal"]["items"])
+
+    if total_found > 0:
+        for key, data in categories.items():
+            if data["items"]:
+                body = "\n".join(data["items"][:15])
+                footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
+                send_discord(body + footer, title=data["title"], color=data["color"])
     else:
-        prompt = f"""
-        あなたはプロの機関投資家です。{time_context}のスクリーニングの結果、条件を満たす初動銘柄は「0件」でした。
-        現在の地合い（押し目形成や様子見ムードなど）において投資家が今どのような心理状態にあり、なぜ無理にエントリーすべきではないのか、「テス流戦略」の視点を取り入れた相場解説・アドバイスを3〜4行で記述してください。
-        """
+        empty_title = f"ℹ️ {timing_title}・定期巡回報告"
+        empty_message = "今回のスクリーニングにおいて、設定条件に合致するスイング候補銘柄はありませんでした。\n\n※システムおよび出来高トリプルフィルターは正常に機能しています。"
+        send_discord(empty_message, title=empty_title, color=0x95a5a6)
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=800)
-        )
-        return response.text
-    except Exception as e:
-        return f"Gemini APIエラー: {e}"
+    print("✅ パトロール完了")
 
-# ==========================================
-# 5. Discord Webhook へのメッセージ送信
-# ==========================================
-def send_to_discord(webhook_url, matched_stocks, ai_commentary, current_hour):
-    current_date = datetime.date.today().strftime("%Y年%m%d日")
-    time_title = "前場巡回スキャン (11:00)" if current_hour == 11 else "大引け確定スキャン (16:00)"
-    
-    if len(matched_stocks) > 0:
-        embed_fields = []
-        for s in matched_stocks:
-            value_text = (
-                f"**現在値/終値**: {s['close']}円\n"
-                f"**出来高倍率**: `{s['vol_ratio']}倍` {'(前場換算)' if current_hour == 11 else ''}\n"
-                f"**新高値まで**: {s['distance_high']}%\n"
-                f"**RCI (9/27)**: `{s['rci9']}` / `{s['rci27']}`\n"
-                f"**RSI / DMI**: RSI:{s['rsi14']} / {s['dmi_signal']}\n"
-                f"**25日VWAP乖離**: {s['vwap_gap']}%"
-            )
-            embed_fields.append({"name": f"📌 {s['name']} ({s['ticker']}) [{s['market']}]", "value": value_text, "inline": False})
-            
-        payload = {
-            "content": f"📡 **【新高値ブレイク初動アラート】** ({current_date} {time_title})",
-            "embeds": [
-                {"title": "🎯 条件合致銘柄リスト", "color": 15158332 if current_hour == 16 else 16753920, "fields": embed_fields},
-                {"title": "💡 【Gemini's Eye】 AI時系列深掘り解説", "description": ai_commentary, "color": 3447003}
-            ]
-        }
-    else:
-        payload = {
-            "content": f"📡 **【新高値ブレイク自動スクリーニング】** ({current_date} {time_title})",
-            "embeds": [
-                {"title": "❌ 該当銘柄は「0件」です", "description": f"現在、テス流・ハイブリッド新高値ブレイクの条件を満たす初動銘柄はありません。", "color": 9807270},
-                {"title": "📊 【Gemini's Eye】 現在の相場心理と立ち回り", "description": ai_commentary, "color": 3447003}
-            ]
-        }
-
-    requests.post(webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"})
-
-# ==========================================
-# メイン実行処理
-# ==========================================
 if __name__ == "__main__":
-    DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-    if not DISCORD_WEBHOOK_URL:
-        sys.exit(1)
-        
-    # 現在の日本時間(JST)の「時」を取得
-    # GitHub Actions上の環境変数としてJSTの時間を判定させます
-    now_jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    current_hour = now_jst.hour
-    
-    # 予期せぬ時間で動いた場合の安全弁（近い時間帯に丸める）
-    if current_hour <= 12:
-        exec_hour = 11
-    else:
-        exec_hour = 16
-        
-    print(f"=== スクリプト実行開始 (判定時間帯: {exec_hour}時) ===")
-    
-    matched_results = scan_markets(exec_hour)
-    ai_analysis = get_gemini_analysis(matched_results, exec_hour)
-    send_to_discord(DISCORD_WEBHOOK_URL, matched_results, ai_analysis, exec_hour)
-    
-    print("=== スクリプト処理終了 ===")
-
+    main()
