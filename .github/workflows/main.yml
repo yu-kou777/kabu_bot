@@ -1,31 +1,33 @@
-name: Daily Breakout Screener
+name: Jack株AI・テス流厳選スイングパトロール
 
 on:
   schedule:
-    # 毎日日本時間15:15（UTC 6:15）に自動実行
-    - cron: '15 6 * * 1-5'
-  workflow_dispatch: # GitHub上で手動実行できるボタンを表示
+    # 💡 11:00 (日本時間) ＝ UTC 2:00
+    # 💡 16:00 (日本時間) ＝ UTC 7:00
+    - cron: '0 2,7 * * 1-5'
+  
+  # 💡 手動テスト起動ボタン（Run workflow）を有効化
+  workflow_dispatch:
 
 jobs:
-  run-screener:
+  patrol:
     runs-on: ubuntu-latest
-
     steps:
-    - name: リポジトリのチェックアウト
-      uses: actions/checkout@v4
+      - name: リポジトリのコードをチェックアウト
+        uses: actions/checkout@v4
 
-    - name: Python環境のセットアップ
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Python環境のセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: 依存ライブラリのインストール
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: 必要なライブラリのインストール
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas requests numpy xlrd openpyxl pytz jpholiday
 
-    - name: スクリーニングおよびDiscord通知の実行
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      run: python main.py
+      - name: スクリーニングスクリプトの実行
+        env:
+          GEMINI_KEY: "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
+        run: |
+          python main.py
