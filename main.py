@@ -8,12 +8,11 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 設定（テス流・呼値5円以上スイング仕様） ---
+# --- ⚙️ 設定 ---
 GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-# 💡 東証のルール上、株価が3,000円を超えると呼値の刻みが「5円以上」に上がります。
-PRICE_MIN = 3001       # 呼値5円以上（株価3,001円以上）の銘柄に完全限定
+PRICE_MIN = 3001       # 呼値5円以上（株価3,001円以上）の値がさ株限定
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
@@ -30,38 +29,71 @@ def get_target_tickers():
     except:
         return {"8035.T": "東エレク", "9984.T": "SBG", "6834.T": "精工技研"}
 
-# --- 📊 テクニカル指標計算ユニット（マスピ2完全準拠） ---
+# --- 📊 指標計算関数 ---
 def calculate_rci(df, period):
     def _rci(x):
-        n = len(x)
-        d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
+        n = len(x); d = np.sum((np.arange(1, n + 1) - pd.Series(x).rank().values)**2)
         return (1 - (6 * d) / (n * (n**2 - 1))) * 100
     return df.rolling(window=period).apply(_rci)
 
 def calculate_psychological(df, period=12):
     return ((df.diff() > 0).astype(int).rolling(window=period).sum() / period) * 100
 
-def calculate_dmi_custom(high_df, low_df, close_df, di_period=14, adx_period=9):
-    """マスピ2設定：DI=14, ADX=9 に準拠したDMI計算"""
-    up_move = high_df.diff()
-    down_move = -low_df.diff()
-    
-    dm_pos = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    dm_neg = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    tr1 = high_df - low_df
-    tr2 = (high_df - close_df.shift()).abs()
-    tr3 = (low_df - close_df.shift()).abs()
-    tr = pd.DataFrame(np.max([tr1, tr2, tr3], axis=0), index=close_df.index, columns=close_df.columns)
-    
-    atr = tr.rolling(window=di_period).mean()
-    plus_di = (pd.DataFrame(dm_pos, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
-    minus_di = (pd.DataFrame(dm_neg, index=close_df.index, columns=close_df.columns).rolling(window=di_period).mean() / (atr + 1e-9)) * 100
-    
-    dx = (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9) * 100
-    adx = dx.rolling(window=adx_period).mean()
-    
-    return plus_di, minus_di, adx
+def get_sakata_signal(h, l, o, c):
+    """酒田五法判定"""
+    s = []
+    try:
+        if (c.iloc[-1] > o.iloc[-1]) and (c.iloc[-2] > o.iloc[-2]) and (c.iloc[-3] > o.iloc[-3]) and (c.iloc[-1] > c.iloc[-2]):
+            s.append("🔆赤三兵")
+        if (c.iloc[-2] < o.iloc[-2]) and (c.iloc[-1] > o.iloc[-1]) and (c.iloc[-1] >= o.iloc[-2]):
+            s.append("🔥陽の包み足")
+        if l.iloc[-1] > h.iloc[-2]:
+            s.append("✨上放れ窓")
+        if (c.iloc[-3] < o.iloc[-3]) and (abs(c.iloc[-2] - o.iloc[-2]) < abs(c.iloc[-3] - o.iloc[-3]) * 0.2) and (c.iloc[-1] > o.iloc[-1]):
+            s.append("🌅明けの明星")
+    except: pass
+    return " ".join(s)
+
+def check_channel_touch(df_stock, lookback=20):
+    """直近の高値・安値から平行チャネルの「帯」を計算し、現在のタッチを判定"""
+    try:
+        df_sub = df_stock.tail(lookback)
+        highs = df_sub['High'].values
+        lows = df_sub['Low'].values
+        closes = df_sub['Close'].values
+        p_last = closes[-1]
+        
+        # 高値・準高値の検出
+        idx_h1 = np.argmax(highs)
+        h1 = highs[idx_h1]
+        highs_remain = highs.copy(); highs_remain[idx_h1] = -1
+        idx_h2 = np.argmax(highs_remain)
+        h2 = highs[idx_h2]
+        
+        # 安値・準安値の検出
+        idx_l1 = np.argmin(lows)
+        l1 = lows[idx_l1]
+        lows_remain = lows.copy(); lows_remain[idx_l1] = 99999999
+        idx_l2 = np.argmin(lows_remain)
+        l2 = lows[idx_l2]
+
+        # トレンドラインの傾き(簡易計算)
+        slope_h = (h1 - h2) / (idx_h1 - idx_h2 + 1e-5)
+        slope_l = (l1 - l2) / (idx_l1 - idx_l2 + 1e-5)
+        
+        # 下限ライン（サポートの帯）
+        expected_low = l1 + slope_l * (lookback - 1 - idx_l1)
+        # 上限ライン（レジスタンスの帯）
+        expected_high = h1 + slope_h * (lookback - 1 - idx_h1)
+        
+        # 帯の中にいるか（誤差1%以内をタッチとみなす）
+        is_support_touch = abs(p_last - expected_low) / expected_low <= 0.015
+        is_resistance_touch = abs(p_last - expected_high) / expected_high <= 0.015
+        
+        if is_support_touch: return "サポート帯タッチ"
+        if is_resistance_touch: return "レジスタンス帯タッチ"
+    except: pass
+    return None
 
 def send_discord(text, title=None, color=0x2ecc71):
     payload = {"embeds": [{"title": title, "description": text, "color": color, "timestamp": datetime.now().isoformat()}]}
@@ -70,35 +102,32 @@ def send_discord(text, title=None, color=0x2ecc71):
         time.sleep(1)
     except: pass
 
-# --- 🚀 巡回メインロジック ---
+# --- 🚀 メインロジック ---
 def main():
-    if is_market_holiday():
-        print("☕ 休場日です。")
-        return
+    if is_market_holiday(): return
 
-    # ⏰ 実行時の日本時間を取得して前場・後場のタイトル・出来高条件を自動切替
     tz = pytz.timezone('Asia/Tokyo')
     current_hour = datetime.now(tz).hour
     
     if current_hour < 13:
         timing_title = "【前場・11:00中間巡回】"
-        vol_today_multiplier = 0.4  
+        vol_today_multiplier = 0.6  # 前場は0.6倍
     else:
         timing_title = "【後場・16:00大引確定】"
-        vol_today_multiplier = 1.3  
+        vol_today_multiplier = 1.5  # 2.0倍から1.5倍に緩和（緩め設定）
 
-    print(f"🚀 {timing_title} テス流・スイングパトロール開始(呼値5円以上限定版)...")
+    print(f"🚀 {timing_title} テス流・トレンドチャネル反転パトロール開始...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
     categories = {
-        "buy_signal": {
-            "title": f"🔥{timing_title}・スイング大底反転 (即買い候補)",
-            "items": [], "codes": [], "color": 0xff3366
+        "confirmed_buy": {
+            "title": f"🏹{timing_title}・【反転の確証】スイング底値狙撃サイン",
+            "items": [], "codes": [], "color": 0x00ffff
         },
-        "forecast_signal": {
-            "title": f"📈{timing_title}・反転予兆 (DMI接近 × 底圏維持)",
-            "items": [], "codes": [], "color": 0x3399ff
+        "confirmed_sell": {
+            "title": f"🛑{timing_title}・【反転の確証】天井圏レジスタンス到達",
+            "items": [], "codes": [], "color": 0xff3333
         }
     }
 
@@ -106,80 +135,73 @@ def main():
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
-            # 取引データを一括ダウンロード
             data = yf.download(chunk, period="1y", interval="1d", progress=False)
-            cl, hi, lo, vo = data['Close'], data['High'], data['Low'], data['Volume']
+            cl, hi, lo, op, vo = data['Close'], data['High'], data['Low'], data['Open'], data['Volume']
             
-            # 指標の一括計算
             r9_df, r27_df = calculate_rci(cl, 9), calculate_rci(cl, 27)
             psy_df = calculate_psychological(cl, 12)
-            plus_di_df, minus_di_df, adx_df = calculate_dmi_custom(hi, lo, cl)
             
             for s in chunk:
                 try:
-                    c_s = cl[s].dropna()
-                    v_s = vo[s].dropna()
-                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue  # 💡 ここで3,000円以下の株(呼値1円単位)をすべて除外
+                    c_s = cl[s].dropna(); v_s = vo[s].dropna()
+                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue  
                     
-                    # ーーー 🛠️ 出来高トリプルフィルター ーーー
+                    # ーーー 🛠️ 出来高トリプルフィルター（緩め新基準） ーーー
                     vol_3m_avg = v_s.iloc[-60:].mean()          
                     vol_today = v_s.iloc[-1]                     
                     vol_5d_avg = v_s.iloc[-5:].mean()            
                     
-                    if vol_3m_avg < 300000: continue             
-                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue   
-                    if vol_5d_avg < (vol_3m_avg * 1.0): continue  
+                    if vol_3m_avg < 500000: continue             # 平均50万株
+                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue   # 当日1.5倍（前場0.6倍）
+                    if vol_5d_avg < (vol_3m_avg * 1.2): continue  # 5日平均1.2倍
                     
-                    # ーーー 📊 テクニカル値の抽出 ーーー
+                    # ーーー 📊 各種値の抽出 ーーー
                     p = c_s.iloc[-1]
                     r9_c, r9_p = r9_df[s].iloc[-1], r9_df[s].iloc[-2]
-                    r27_c = r27_df[s].iloc[-1]
+                    r27_c, r27_p = r27_df[s].iloc[-1], r27_df[s].iloc[-2]
                     psy_c, psy_p = psy_df[s].iloc[-1], psy_df[s].iloc[-2]
                     
-                    p_di_c, p_di_p = plus_di_df[s].iloc[-1], plus_di_df[s].iloc[-2]
-                    m_di_c, m_di_p = minus_di_df[s].iloc[-1], minus_di_df[s].iloc[-2]
+                    # 酒田サイン・トレンドライン判定の呼び出し
+                    df_single = pd.DataFrame({'Open': op[s], 'High': hi[s], 'Low': lo[s], 'Close': cl[s], 'Volume': vo[s]}).dropna()
+                    sakata = get_sakata_signal(df_single['High'], df_single['Low'], df_single['Open'], df_single['Close'])
+                    channel_status = check_channel_touch(df_single)
                     
-                    dmi_approaching = (p_di_c > p_di_p) and (m_di_c < m_di_p) and (p_di_c < m_di_c)
-                    
+                    # 🌟 トレンドラインの帯にタッチしていない銘柄は足切り
+                    if not channel_status: continue
+
                     code_num = s.replace(".T", "")
                     vol_ratio = vol_today / vol_3m_avg
-                    
-                    # 💡 呼値の表示判別をスマートに追記
                     yobine_label = "5円単位" if p <= 5000 else "10円単位" if p <= 30000 else "50円単位〜"
-                    
-                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円` / {yobine_label}) 出来高:{vol_ratio:.2f}倍\n"
-                            f"└ RCI9: `{r9_c:.0f}`(前`{r9_p:.0f}`) | RCI27: `{r27_c:.0f}` | Psy: `{psy_c:.0f}`\n")
 
-                    # ーーー 🎯 条件判定ロジック ーーー
-                    is_rci_turn_up = (r9_p <= -85 and r9_c > r9_p) or (r9_p <= -50 and r9_c >= -50)
-                    is_psy_turn_up = (psy_p <= 25 and psy_c > psy_p) or (psy_c >= 30 and psy_p <= 30)
+                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円` / {yobine_label}) 出来高:{vol_ratio:.2f}倍\n"
+                            f"├ 📐状態: `{channel_status}` | 酒田: `{sakata if sakata else '足形確認中'}`\n"
+                            f"└ RCI9:`{r9_c:.0f}` | RCI27:`{r27_c:.0f}` | Psy:`{psy_c:.0f}`\n")
+
+                    # ーーー 🎯 【反転の確証】条件分岐 ーーー
+                    # ① 底値予想の確証（サポート帯タッチ ＋ RCI底打ち反転 ＋ 酒田サイン）
+                    is_rci_bottom = (r9_c <= -80 or (r9_p <= -15 and r9_c > r9_p))
+                    is_psy_bottom = (psy_c <= 40)
+                    is_rci_hint = (r27_c < r27_p and r27_c < -15) and (r9_c <= -85) # 反転の兆し
                     
-                    if (r27_c >= -50) and is_rci_turn_up and is_psy_turn_up:
-                        categories["buy_signal"]["items"].append(card)
-                        categories["buy_signal"]["codes"].append(code_num)
-                    elif (r9_c <= -80) and (25 <= psy_c <= 35) and dmi_approaching:
-                        categories["forecast_signal"]["items"].append(card)
-                        categories["forecast_signal"]["codes"].append(code_num)
+                    if channel_status == "サポート帯タッチ" and (is_rci_bottom or is_rci_hint) and is_psy_bottom and sakata:
+                        categories["confirmed_buy"]["items"].append(card)
+                        categories["confirmed_buy"]["codes"].append(code_num)
+                        
+                    # ② 高値予想の確証（レジスタンス帯タッチ ＋ RCI過熱折れ ＋ サイコロ過熱）
+                    elif channel_status == "レジスタンス帯タッチ" and (r9_c >= 80 and r9_c < r9_p) and (psy_c >= 65):
+                        categories["confirmed_sell"]["items"].append(card)
+                        categories["confirmed_sell"]["codes"].append(code_num)
 
                 except: continue
         except: continue
         time.sleep(1)
 
     # ーーー 📨 Discord送信 ーーー
-    total_found = len(categories["buy_signal"]["items"]) + len(categories["forecast_signal"]["items"])
-
-    if total_found > 0:
-        for key, data in categories.items():
-            if data["items"]:
-                body = "\n".join(data["items"][:15])
-                footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
-                send_discord(body + footer, title=data["title"], color=data["color"])
-    else:
-        empty_title = f"ℹ️ {timing_title}・定期巡回報告"
-        empty_message = "今回のスクリーニングにおいて、設定条件(呼値5円単位以上の値がさ株)に合致するスイング候補銘柄はありませんでした。\n\n※システムおよび各種フィルターは正常に機能しています。"
-        send_discord(empty_message, title=empty_title, color=0x95a5a6)
-
-    print("✅ パトロール完了")
+    for key, data in categories.items():
+        if data["items"]:
+            body = "\n".join(data["items"][:15])
+            footer = f"\n**📌 コピペ用コード (番号のみ)**\n`{','.join(data['codes'])}`"
+            send_discord(body + footer, title=data["title"], color=data["color"])
 
 if __name__ == "__main__":
     main()
