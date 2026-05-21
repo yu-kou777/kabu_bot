@@ -83,7 +83,7 @@ def main():
         vol_today_multiplier = 0.4  # 取引時間2時間でのペース換算
     else:
         timing_title = "【後場・16:00大引確定】"
-        vol_today_multiplier = 1.5  # 大引け時点で1.5倍以上
+        vol_today_multiplier = 1.2  # 大引け時点で1.5倍以上
 
     print(f"🚀 {timing_title} テス流・スイングパトロール開始(出来高緩和版)...")
     name_map = get_target_tickers()
