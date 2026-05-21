@@ -8,11 +8,12 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 設定（テス流・スイング最適化仕様） ---
+# --- ⚙️ 設定（テス流・呼値5円以上スイング仕様） ---
 GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
 DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
 
-PRICE_MIN = 300  # 低位株カット
+# 💡 東証のルール上、株価が3,000円を超えると呼値の刻みが「5円以上」に上がります。
+PRICE_MIN = 3001       # 呼値5円以上（株価3,001円以上）の銘柄に完全限定
 
 def is_market_holiday():
     tz = pytz.timezone('Asia/Tokyo')
@@ -75,17 +76,18 @@ def main():
         print("☕ 休場日です。")
         return
 
+    # ⏰ 実行時の日本時間を取得して前場・後場のタイトル・出来高条件を自動切替
     tz = pytz.timezone('Asia/Tokyo')
     current_hour = datetime.now(tz).hour
     
     if current_hour < 13:
         timing_title = "【前場・11:00中間巡回】"
-        vol_today_multiplier = 0.4  # 取引時間2時間でのペース換算
+        vol_today_multiplier = 0.4  
     else:
         timing_title = "【後場・16:00大引確定】"
-        vol_today_multiplier = 1.2  # 大引け時点で1.5倍以上
+        vol_today_multiplier = 1.3  
 
-    print(f"🚀 {timing_title} テス流・スイングパトロール開始(出来高緩和版)...")
+    print(f"🚀 {timing_title} テス流・スイングパトロール開始(呼値5円以上限定版)...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -104,9 +106,11 @@ def main():
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
+            # 取引データを一括ダウンロード
             data = yf.download(chunk, period="1y", interval="1d", progress=False)
             cl, hi, lo, vo = data['Close'], data['High'], data['Low'], data['Volume']
             
+            # 指標の一括計算
             r9_df, r27_df = calculate_rci(cl, 9), calculate_rci(cl, 27)
             psy_df = calculate_psychological(cl, 12)
             plus_di_df, minus_di_df, adx_df = calculate_dmi_custom(hi, lo, cl)
@@ -115,16 +119,18 @@ def main():
                 try:
                     c_s = cl[s].dropna()
                     v_s = vo[s].dropna()
-                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue
+                    if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue  # 💡 ここで3,000円以下の株(呼値1円単位)をすべて除外
                     
-                    vol_3m_avg = v_s.iloc[-60:].mean()
-                    vol_today = v_s.iloc[-1]
-                    vol_5d_avg = v_s.iloc[-5:].mean()
+                    # ーーー 🛠️ 出来高トリプルフィルター ーーー
+                    vol_3m_avg = v_s.iloc[-60:].mean()          
+                    vol_today = v_s.iloc[-1]                     
+                    vol_5d_avg = v_s.iloc[-5:].mean()            
                     
-                    if vol_3m_avg < 300000: continue
-                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue
-                    if vol_5d_avg < (vol_3m_avg * 1.0): continue
+                    if vol_3m_avg < 300000: continue             
+                    if vol_today < (vol_3m_avg * vol_today_multiplier): continue   
+                    if vol_5d_avg < (vol_3m_avg * 1.0): continue  
                     
+                    # ーーー 📊 テクニカル値の抽出 ーーー
                     p = c_s.iloc[-1]
                     r9_c, r9_p = r9_df[s].iloc[-1], r9_df[s].iloc[-2]
                     r27_c = r27_df[s].iloc[-1]
@@ -138,9 +144,13 @@ def main():
                     code_num = s.replace(".T", "")
                     vol_ratio = vol_today / vol_3m_avg
                     
-                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円`) 出来高:{vol_ratio:.2f}倍\n"
+                    # 💡 呼値の表示判別をスマートに追記
+                    yobine_label = "5円単位" if p <= 5000 else "10円単位" if p <= 30000 else "50円単位〜"
+                    
+                    card = (f"**{code_num} {name_map[s]}** (`{p:,.0f}円` / {yobine_label}) 出来高:{vol_ratio:.2f}倍\n"
                             f"└ RCI9: `{r9_c:.0f}`(前`{r9_p:.0f}`) | RCI27: `{r27_c:.0f}` | Psy: `{psy_c:.0f}`\n")
 
+                    # ーーー 🎯 条件判定ロジック ーーー
                     is_rci_turn_up = (r9_p <= -85 and r9_c > r9_p) or (r9_p <= -50 and r9_c >= -50)
                     is_psy_turn_up = (psy_p <= 25 and psy_c > psy_p) or (psy_c >= 30 and psy_p <= 30)
                     
@@ -155,6 +165,7 @@ def main():
         except: continue
         time.sleep(1)
 
+    # ーーー 📨 Discord送信 ーーー
     total_found = len(categories["buy_signal"]["items"]) + len(categories["forecast_signal"]["items"])
 
     if total_found > 0:
@@ -165,7 +176,7 @@ def main():
                 send_discord(body + footer, title=data["title"], color=data["color"])
     else:
         empty_title = f"ℹ️ {timing_title}・定期巡回報告"
-        empty_message = "今回のスクリーニングにおいて、設定条件に合致するスイング候補銘柄はありませんでした。\n\n※システムおよび出来高トリプルフィルターは正常に機能しています。"
+        empty_message = "今回のスクリーニングにおいて、設定条件(呼値5円単位以上の値がさ株)に合致するスイング候補銘柄はありませんでした。\n\n※システムおよび各種フィルターは正常に機能しています。"
         send_discord(empty_message, title=empty_title, color=0x95a5a6)
 
     print("✅ パトロール完了")
