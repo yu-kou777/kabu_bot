@@ -1,3 +1,4 @@
+import os
 import yfinance as yf
 import pandas as pd
 import requests
@@ -8,9 +9,9 @@ from datetime import datetime
 import pytz
 import jpholiday
 
-# --- ⚙️ 設定 ---
-GEMINI_KEY = "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys"
-DISCORD_URL = "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX"
+# --- ⚙️ 設定（GitHub Secrets 優先、なければ直書きを予備で使用） ---
+GEMINI_KEY = os.environ.get("GEMINI_KEY", "AIzaSyBUiTPV-0yOXIDzgydV4NoArJkBufJSpys")
+DISCORD_URL = os.environ.get("DISCORD_URL", "https://discord.com/api/webhooks/1470471750482530360/-epGFysRsPUuTesBWwSxof0sa9Co3Rlp415mZ1mkX2v3PZRfxgZ2yPPHa1FvjxsMwlVX")
 
 PRICE_MIN = 3001       # 呼値5円以上（株価3,001円以上）限定
 
@@ -54,12 +55,11 @@ def get_sakata_signal(h, l, o, c):
     return " ".join(s)
 
 def check_channel_touch(df_stock, lookback=20):
-    """直近データからチャネル帯を計算（安全堅牢版）"""
+    """直近データからチャネル帯を計算（データクレンジング版）"""
     try:
         if len(df_stock) < lookback: return None
         df_sub = df_stock.tail(lookback)
         
-        # データのクレンジング
         highs = pd.Series(df_sub['High']).ffill().bfill().values
         lows = pd.Series(df_sub['Low']).ffill().bfill().values
         closes = pd.Series(df_sub['Close']).ffill().bfill().values
@@ -79,7 +79,6 @@ def check_channel_touch(df_stock, lookback=20):
         expected_low = l1 + slope_l * (lookback - 1 - idx_l1)
         expected_high = h1 + slope_h * (lookback - 1 - idx_h1)
         
-        # 判定を少しマイルドに調整
         is_support_touch = abs(p_last - expected_low) / (expected_low + 1e-9) <= 0.02
         is_resistance_touch = abs(p_last - expected_high) / (expected_high + 1e-9) <= 0.02
         
@@ -89,16 +88,22 @@ def check_channel_touch(df_stock, lookback=20):
     return None
 
 def send_discord_raw(payload):
-    """Discordへの送信を確実に実行する関数"""
+    """安全にDiscordへPOSTリクエストを送信するコアユニット"""
     try:
+        if not DISCORD_URL or "api/webhooks" not in DISCORD_URL:
+            print("⚠️ Discord WebhookのURLが正しく設定されていません。")
+            return False
         res = requests.post(DISCORD_URL, json=payload, timeout=15)
-        return res.status_code == 204 or res.status_code == 200
-    except:
+        return res.status_code in [200, 204]
+    except Exception as e:
+        print(f"❌ 送信エラー: {e}")
         return False
 
 # --- 🚀 メインロジック ---
 def main():
-    if is_market_holiday(): return
+    if is_market_holiday(): 
+        print("☕ 本日は休場日です。")
+        return
 
     tz = pytz.timezone('Asia/Tokyo')
     current_hour = datetime.now(tz).hour
@@ -110,7 +115,7 @@ def main():
         timing_title = "【後場・16:00大引確定】"
         vol_today_multiplier = 1.5
 
-    print(f"🚀 {timing_title} スキャナー起動...")
+    print(f"🚀 {timing_title} テス流・トレンドチャネルスキャン開始...")
     name_map = get_target_tickers()
     tickers = list(name_map.keys())
     
@@ -125,7 +130,7 @@ def main():
         }
     }
 
-    chunk_size = 80  # エラー回避のため塊を少し小さく
+    chunk_size = 80  
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         try:
@@ -134,7 +139,6 @@ def main():
             
             cl, hi, lo, op, vo = data['Close'], data['High'], data['Low'], data['Open'], data['Volume']
             
-            # 欠損値対策を徹底
             r9_df = calculate_rci(cl, 9).ffill().bfill()
             r27_df = calculate_rci(cl, 27).ffill().bfill()
             psy_df = calculate_psychological(cl, 12).ffill().bfill()
@@ -146,7 +150,7 @@ def main():
                     v_s = vo[s].dropna()
                     if len(c_s) < 65 or c_s.iloc[-1] < PRICE_MIN: continue  
                     
-                    # 出来高トリプルフィルター
+                    # 出来高トリプルフィルター（緩め基準）
                     vol_3m_avg = v_s.iloc[-60:].mean()          
                     vol_today = v_s.iloc[-1]                     
                     vol_5d_avg = v_s.iloc[-5:].mean()            
@@ -177,12 +181,9 @@ def main():
                     is_rci_hint = (r27_c < r27_p and r27_c < -15) and (r9_c <= -85) 
                     is_today_yang = (c_s.iloc[-1] > op[s].iloc[-1]) 
 
-                    # ① 底値の確証
                     if channel_status == "サポート帯タッチ" and (is_rci_bottom or is_rci_hint) and is_psy_bottom and is_today_yang:
                         categories["confirmed_buy"]["items"].append(card)
                         categories["confirmed_buy"]["codes"].append(code_num)
-                        
-                    # ② 反転予兆
                     elif (sakata != "" or is_rci_hint) and (psy_c <= 40):
                         categories["forecast_signal"]["items"].append(card)
                         categories["forecast_signal"]["codes"].append(code_num)
@@ -202,10 +203,10 @@ def main():
                 send_count += 1
             time.sleep(1)
 
-    # 🌟 1件も送るものがなかった場合、生存確認用のグレー埋め込みメッセージを「確実に」送信
+    # 🌟 1件もヒットしなかった場合、グレーの生存確認メッセージを強制送信
     if send_count == 0:
         empty_title = f"ℹ️ {timing_title}・定期巡回完了報告"
-        empty_message = f"全銘柄を正常にスキャンしましたが、現時点で「テス流・チャネル反転基準」を完璧にクリアする値がさ株はありませんでした。\n\n※この通知が届いている＝システムおよびDiscord連携は**100%正常稼働**しています。"
+        empty_message = f"全銘柄を正常にスキャンしましたが、現時点で「テス流・チャネル反転基準」を完璧にクリアする値がさ株はありませんでした。\n\n※この通知がDiscordに届いている＝システムおよびWebhookの開通は**100%正常**です。"
         payload = {"embeds": [{"title": empty_title, "description": empty_message, "color": 0x95a5a6, "timestamp": datetime.now().isoformat()}]}
         send_discord_raw(payload)
 
